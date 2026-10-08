@@ -96,9 +96,6 @@ packages = [
   "netcat",
   "nginx",
   "nmap",
-  "node",          # also in mise
-  "nushell",
-  "nvm",
   "openapi-generator",
   "openbao",
   "openjdk",
@@ -143,16 +140,6 @@ packages = [
   "unzip",
   "uv",
   "vercel",
-  "vlt",
-  "wget",
-  "wireguard-go",
-  "wireguard-tools",
-  "wireshark",
-  "xcodegen",
-  "xcodes",
-  "xray",
-  "yarn",
-  "yt-dlp",
   "zellij",
   "zoxide",
   # Via taps
@@ -273,6 +260,7 @@ tools = [
   "aqua:hashicorp/packer@latest",
   "aqua:getsentry/sentry-cli@latest",
   "aqua:pulumi/pulumi@latest",
+  "bun@latest",                           # JS runtime + package manager
 ]
 
 # azure-cli managed via pipx (not in aqua registry)
@@ -291,7 +279,8 @@ packages = [
   "azure-cli",
 ]
 
-[npm]
+# Bun globals — bun is the JS runtime and package manager (npm is not used)
+[bun]
 global = [
   "imgproxy",
 ]

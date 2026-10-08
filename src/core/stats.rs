@@ -4,7 +4,7 @@ use std::fmt;
 pub struct UpdateStats {
     pub formulae: ComponentStats,
     pub casks: CaskStats,
-    pub npm: ComponentStats,
+    pub bun: ComponentStats,
 }
 
 #[derive(Debug, Default)]
@@ -144,11 +144,11 @@ impl fmt::Display for UpdateStats {
             }
         }
 
-        // NPM
-        if self.npm.upgraded > 0 || self.npm.skipped > 0 {
-            writeln!(f, "NPM:      {} upgraded", self.npm.upgraded)?;
-            if self.npm.skipped > 0 {
-                writeln!(f, "         {} with warnings", self.npm.skipped)?;
+        // Bun
+        if self.bun.upgraded > 0 || self.bun.skipped > 0 {
+            writeln!(f, "Bun:      {} upgraded", self.bun.upgraded)?;
+            if self.bun.skipped > 0 {
+                writeln!(f, "         {} with warnings", self.bun.skipped)?;
             }
         }
 

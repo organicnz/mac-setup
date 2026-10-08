@@ -27,7 +27,7 @@ pub struct Manifest {
     pub mise: Option<MiseConfig>,
     pub pip: Option<PackageList>,
     pub pipx: Option<PackageList>,
-    pub npm: Option<NpmConfig>,
+    pub bun: Option<BunConfig>,
     pub go: Option<PackageList>,
 }
 
@@ -51,6 +51,11 @@ pub struct NpmConfig {
     pub global: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct BunConfig {
+    pub global: Vec<String>,
+}
+
 // ============================================================================
 // PROVISION STATS
 // ============================================================================
@@ -63,7 +68,7 @@ pub struct ProvisionStats {
     pub runtimes_installed: usize,
     pub pip_installed: usize,
     pub pipx_installed: usize,
-    pub npm_installed: usize,
+    pub bun_installed: usize,
     pub go_installed: usize,
     pub skipped: usize,
     pub failed: usize,
@@ -78,7 +83,7 @@ impl std::fmt::Display for ProvisionStats {
         writeln!(f, "Runtimes (mise):    {}", self.runtimes_installed)?;
         writeln!(f, "Pip packages:       {}", self.pip_installed)?;
         writeln!(f, "Pipx apps:          {}", self.pipx_installed)?;
-        writeln!(f, "NPM globals:        {}", self.npm_installed)?;
+        writeln!(f, "Bun globals:        {}", self.bun_installed)?;
         writeln!(f, "Go tools:           {}", self.go_installed)?;
         if self.skipped > 0 {
             writeln!(f, "Skipped (already):  {}", self.skipped)?;
@@ -169,9 +174,9 @@ pub fn run(config: &Config) -> bool {
         install_pipx_packages(&pipx.packages, config, &mut stats);
     }
 
-    // 11. NPM globals (after mise has installed node)
-    if let Some(npm) = &manifest.npm {
-        install_npm_globals(&npm.global, config, &mut stats);
+    // 11. Bun globals (after mise has installed bun)
+    if let Some(bun) = &manifest.bun {
+        install_bun_globals(&bun.global, config, &mut stats);
     }
 
     // 12. Go tools (after mise has installed go)
@@ -598,29 +603,33 @@ fn install_pip_packages(packages: &[String], config: &Config, stats: &mut Provis
 }
 
 // ============================================================================
-// NPM GLOBALS
+// BUN GLOBALS (formerly NPM) — install_bun_globals defined above
 // ============================================================================
 
-fn install_npm_globals(packages: &[String], config: &Config, stats: &mut ProvisionStats) {
+// ============================================================================
+// BUN GLOBALS
+// ============================================================================
+
+fn install_bun_globals(packages: &[String], config: &Config, stats: &mut ProvisionStats) {
     if packages.is_empty() {
         return;
     }
-    if !command_available("npm") {
+    if !command_available("bun") {
         log(
-            "  ⚠ npm not found — ensure node is installed via mise first",
+            "  ⚠ bun not found — ensure bun is installed via mise first",
             config,
         );
         return;
     }
     log(
-        &format!("\n📦 Installing {} npm globals...", packages.len()),
+        &format!("\n🐰 Installing {} bun globals...", packages.len()),
         config,
     );
 
     for pkg in packages {
         log(&format!("  Installing {}...", pkg), config);
-        let ok = Command::new("npm")
-            .args(["install", "-g", pkg.as_str()])
+        let ok = Command::new("bun")
+            .args(["install", "--global", pkg.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()
@@ -629,7 +638,7 @@ fn install_npm_globals(packages: &[String], config: &Config, stats: &mut Provisi
 
         if ok {
             log(&format!("  ✓ installed: {}", pkg), config);
-            stats.npm_installed += 1;
+            stats.bun_installed += 1;
         } else {
             log(&format!("  ⚠ failed: {}", pkg), config);
             stats.failed += 1;
@@ -781,7 +790,7 @@ packages = ["git", "wget", "hashicorp/tap/terraform"]
 packages = ["docker", "slack"]
 
 [mise]
-tools = ["node@lts", "python@3.12", "aqua:hashicorp/terraform@latest"]
+tools = ["node@lts", "python@3.12", "bun@latest", "aqua:hashicorp/terraform@latest"]
 
 [pip]
 packages = ["python-dotenv", "shodan"]
@@ -789,7 +798,7 @@ packages = ["python-dotenv", "shodan"]
 [pipx]
 packages = ["azure-cli"]
 
-[npm]
+[bun]
 global = ["imgproxy"]
 
 [go]
@@ -806,7 +815,7 @@ packages = ["github.com/tomnomnom/httprobe@master"]
         assert!(manifest.mise.is_some());
         assert!(manifest.pip.is_some());
         assert!(manifest.pipx.is_some());
-        assert!(manifest.npm.is_some());
+        assert!(manifest.bun.is_some());
         assert!(manifest.go.is_some());
     }
 
@@ -825,7 +834,7 @@ packages = ["github.com/tomnomnom/httprobe@master"]
     #[test]
     fn manifest_mise_tools_count() {
         let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
-        assert_eq!(manifest.mise.unwrap().tools.len(), 3);
+        assert_eq!(manifest.mise.unwrap().tools.len(), 4);
     }
 
     #[test]
@@ -837,10 +846,10 @@ packages = ["github.com/tomnomnom/httprobe@master"]
     }
 
     #[test]
-    fn manifest_npm_global() {
+    fn manifest_bun_global() {
         let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
-        let npm = manifest.npm.unwrap();
-        assert_eq!(npm.global[0], "imgproxy");
+        let bun = manifest.bun.unwrap();
+        assert_eq!(bun.global[0], "imgproxy");
     }
 
     #[test]
@@ -875,7 +884,7 @@ packages = ["github.com/tomnomnom/httprobe@master"]
             runtimes_installed: 4,
             pip_installed: 3,
             pipx_installed: 1,
-            npm_installed: 1,
+            bun_installed: 1,
             go_installed: 1,
             skipped: 20,
             failed: 0,

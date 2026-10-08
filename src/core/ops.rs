@@ -959,124 +959,56 @@ pub fn upgrade_pipx(config: &Config) {
 }
 
 // ============================================================================
-// NPM UPDATE FUNCTION
+// ============================================================================
+// BUN UPDATE (replaces npm — bun is the JS runtime and package manager)
 // ============================================================================
 
-pub fn update_npm(config: &Config) -> (bool, Vec<String>) {
-    let mut invalid_packages = Vec::new();
+pub fn update_bun(config: &Config) -> bool {
+    let home = std::env::var("HOME").unwrap_or_default();
 
-    // Check if npm exists
-    let npm_exists = Command::new("which")
-        .arg("npm")
-        .output()
-        .map(|o| o.status.success())
+    // Find bun — check ~/.bun/bin first, then mise shim, then PATH
+    let bun_candidates = [
+        format!("{}/.bun/bin/bun", home),
+        format!("{}/.local/share/mise/shims/bun", home),
+    ];
+
+    let bun_bin = bun_candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .cloned()
+        .unwrap_or_else(|| "bun".to_string());
+
+    let bun_exists = Command::new(&bun_bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false);
 
-    if !npm_exists {
-        utils::log(
-            "ℹ npm not installed, skipping global package updates",
-            config,
-        );
-        return (true, invalid_packages);
+    if !bun_exists {
+        utils::log("ℹ bun not installed, skipping bun global updates", config);
+        return true;
     }
 
-    utils::log("Checking global npm packages...", config);
+    utils::log("🐰 Updating bun globals...", config);
 
-    // Check for invalid package names first
-    match Command::new("npm")
-        .args(["list", "-g", "--depth=0", "--json"])
-        .output()
-    {
-        Ok(output) => {
-            let list_output = String::from_utf8_lossy(&output.stdout);
-            // Look for packages that start with a period (invalid)
-            for line in list_output.lines() {
-                if line.contains("\"@") && line.contains("/.") {
-                    // Extract package name
-                    if let Some(pkg_start) = line.find("\"@") {
-                        if let Some(pkg_end) = line[pkg_start + 1..].find("\"") {
-                            let pkg_name = &line[pkg_start + 1..pkg_start + 1 + pkg_end];
-                            if pkg_name.contains("/.") {
-                                invalid_packages.push(pkg_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !invalid_packages.is_empty() {
-                utils::log(
-                    &format!("⚠ Found {} invalid npm packages:", invalid_packages.len()),
-                    config,
-                );
-                for pkg in &invalid_packages {
-                    utils::log(&format!("  - {}", pkg), config);
-                }
-                utils::log(
-                    "  → Run 'npm uninstall -g <package>' to remove these",
-                    config,
-                );
-            }
-        }
-        Err(_) => {
-            utils::log("⚠ Could not check npm package list", config);
-        }
-    }
-
-    // Check for outdated packages
-    let outdated = Command::new("npm")
-        .args(["outdated", "-g", "--json"])
-        .output();
-
-    let has_outdated = match &outdated {
-        Ok(out) => {
-            // npm outdated returns exit code 1 when packages are outdated
-            // and outputs JSON with the outdated packages
-            !out.stdout.is_empty() && String::from_utf8_lossy(&out.stdout).trim() != "{}"
-        }
-        Err(_) => false,
-    };
-
-    if !has_outdated {
-        utils::log("✓ All global npm packages are up to date", config);
-        return (true, invalid_packages);
-    }
-
-    utils::log("Updating global npm packages...", config);
-
-    match Command::new("npm").args(["update", "-g"]).output() {
+    match Command::new(&bun_bin).args(["update", "--global"]).output() {
         Ok(output) if output.status.success() => {
-            utils::log("✓ Global npm packages updated successfully", config);
-            (true, invalid_packages)
+            utils::log("✓ Bun globals updated", config);
+            true
         }
         Ok(output) => {
-            // Check if it's a permission error
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("EACCES") || stderr.contains("permission") {
-                utils::log(
-                    "⚠ npm update skipped: requires elevated permissions",
-                    config,
-                );
-            } else if stderr.contains("EINVALIDPACKAGENAME") {
-                utils::log(
-                    "⚠ npm update completed with warnings (invalid package names detected above)",
-                    config,
-                );
-            } else {
-                utils::log("⚠ npm update completed with warnings:", config);
-                for line in stderr.lines().take(5) {
-                    utils::log(&format!("  > {}", line), config);
-                }
+            utils::log("⚠ bun update completed with warnings:", config);
+            for line in stderr.lines().take(5) {
+                utils::log(&format!("  > {}", line), config);
             }
-            // Don't fail overall - npm issues are non-critical
-            (true, invalid_packages)
+            true // non-fatal
         }
         Err(e) => {
-            utils::log(
-                &format!("⚠ npm update skipped: command execution failed ({})", e),
-                config,
-            );
-            (true, invalid_packages)
+            utils::log(&format!("⚠ bun update skipped: {}", e), config);
+            true // non-fatal
         }
     }
 }

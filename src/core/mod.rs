@@ -86,7 +86,7 @@ mod tests {
         let stats = UpdateStats::default();
         assert_eq!(stats.formulae.upgraded, 0);
         assert_eq!(stats.formulae.skipped, 0);
-        assert_eq!(stats.npm.upgraded, 0);
+        assert_eq!(stats.bun.upgraded, 0);
         assert_eq!(stats.casks.total_skipped(), 0);
     }
 

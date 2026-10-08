@@ -199,12 +199,9 @@ fn run_update(config: &Config) {
     // Upgrade pipx apps
     ops::upgrade_pipx(config);
 
-    let (npm_success, invalid_npm_packages) = ops::update_npm(config);
-    if !npm_success {
+    // Update bun globals
+    if !ops::update_bun(config) {
         overall_success = false;
-    }
-    if !invalid_npm_packages.is_empty() {
-        update_stats.npm.skipped = invalid_npm_packages.len();
     }
 
     // Post-task cleanup
@@ -281,14 +278,6 @@ fn run_update(config: &Config) {
             if parts.len() >= 4 {
                 log(&format!("\n💾 Disk space available: {}", parts[3]), config);
             }
-        }
-    }
-
-    // NPM warnings
-    if !invalid_npm_packages.is_empty() {
-        log("\n⚠ NPM Invalid Packages (run to fix):", config);
-        for pkg in &invalid_npm_packages {
-            log(&format!("   npm uninstall -g \"{}\"", pkg), config);
         }
     }
 
