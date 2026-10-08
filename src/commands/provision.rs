@@ -764,3 +764,138 @@ fn install_go_tools(packages: &[String], config: &Config, stats: &mut ProvisionS
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_manifest_toml() -> &'static str {
+        r#"
+[taps]
+taps = ["homebrew/core", "hashicorp/tap"]
+
+[formulae]
+packages = ["git", "wget", "hashicorp/tap/terraform"]
+
+[casks]
+packages = ["docker", "slack"]
+
+[mise]
+tools = ["node@lts", "python@3.12", "aqua:hashicorp/terraform@latest"]
+
+[pip]
+packages = ["python-dotenv", "shodan"]
+
+[pipx]
+packages = ["azure-cli"]
+
+[npm]
+global = ["imgproxy"]
+
+[go]
+packages = ["github.com/tomnomnom/httprobe@master"]
+"#
+    }
+
+    #[test]
+    fn manifest_parses_all_sections() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        assert!(manifest.taps.is_some());
+        assert!(manifest.formulae.is_some());
+        assert!(manifest.casks.is_some());
+        assert!(manifest.mise.is_some());
+        assert!(manifest.pip.is_some());
+        assert!(manifest.pipx.is_some());
+        assert!(manifest.npm.is_some());
+        assert!(manifest.go.is_some());
+    }
+
+    #[test]
+    fn manifest_taps_count() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        assert_eq!(manifest.taps.unwrap().taps.len(), 2);
+    }
+
+    #[test]
+    fn manifest_formulae_count() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        assert_eq!(manifest.formulae.unwrap().packages.len(), 3);
+    }
+
+    #[test]
+    fn manifest_mise_tools_count() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        assert_eq!(manifest.mise.unwrap().tools.len(), 3);
+    }
+
+    #[test]
+    fn manifest_pipx_packages() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        let pipx = manifest.pipx.unwrap();
+        assert_eq!(pipx.packages.len(), 1);
+        assert_eq!(pipx.packages[0], "azure-cli");
+    }
+
+    #[test]
+    fn manifest_npm_global() {
+        let manifest: Manifest = toml::from_str(sample_manifest_toml()).unwrap();
+        let npm = manifest.npm.unwrap();
+        assert_eq!(npm.global[0], "imgproxy");
+    }
+
+    #[test]
+    fn manifest_empty_is_valid() {
+        let manifest: Manifest = toml::from_str("").unwrap();
+        assert!(manifest.taps.is_none());
+        assert!(manifest.formulae.is_none());
+        assert!(manifest.mise.is_none());
+    }
+
+    #[test]
+    fn stout_bin_returns_string() {
+        let bin = stout_bin();
+        assert!(!bin.is_empty());
+        // Must end with "stout"
+        assert!(bin.ends_with("stout"));
+    }
+
+    #[test]
+    fn mise_bin_returns_string() {
+        let bin = mise_bin();
+        assert!(!bin.is_empty());
+        assert!(bin.ends_with("mise"));
+    }
+
+    #[test]
+    fn provision_stats_display_contains_sections() {
+        let stats = ProvisionStats {
+            taps_added: 2,
+            formulae_installed: 10,
+            casks_installed: 5,
+            runtimes_installed: 4,
+            pip_installed: 3,
+            pipx_installed: 1,
+            npm_installed: 1,
+            go_installed: 1,
+            skipped: 20,
+            failed: 0,
+        };
+        let out = format!("{}", stats);
+        assert!(out.contains("Taps added:"));
+        assert!(out.contains("Formulae installed:"));
+        assert!(out.contains("Runtimes (mise):"));
+        assert!(out.contains("Pipx apps:"));
+        assert!(out.contains("Skipped (already):"));
+    }
+
+    #[test]
+    fn provision_stats_failed_shown_only_when_nonzero() {
+        let mut stats = ProvisionStats::default();
+        let out_no_fail = format!("{}", stats);
+        assert!(!out_no_fail.contains("Failed:"));
+
+        stats.failed = 3;
+        let out_with_fail = format!("{}", stats);
+        assert!(out_with_fail.contains("Failed:"));
+    }
+}
