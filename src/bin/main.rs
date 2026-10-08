@@ -191,6 +191,14 @@ fn run_update(config: &Config) {
     ops::remove_all_quarantine(config);
     ops::remove_all_formula_quarantine(config);
 
+    // Upgrade mise-managed runtimes and tools
+    if !ops::upgrade_mise(config) {
+        overall_success = false;
+    }
+
+    // Upgrade pipx apps
+    ops::upgrade_pipx(config);
+
     let (npm_success, invalid_npm_packages) = ops::update_npm(config);
     if !npm_success {
         overall_success = false;
@@ -774,8 +782,8 @@ fn run_install(config: &Config) {
     let retention = env::var("BREW_UPDATE_LOG_RETENTION_DAYS").unwrap_or("1".to_string());
     let min_disk = env::var("BREW_UPDATE_MIN_DISK_SPACE_GB").unwrap_or("5".to_string());
 
-    // Replace binary path in plist to point to the new binary with the `update` subcommand
-    let binary_path = dest_bin.to_string_lossy().to_string();
+    // Replace template placeholders — binary path goes into the first <string> slot
+    // The plist template already has <string>update</string> as a separate entry
     let plist_content = template_content
         .replace("{{USER}}", &user)
         .replace("{{HOME}}", &home)
@@ -789,12 +797,7 @@ fn run_install(config: &Config) {
         .replace("{{THROTTLE_INTERVAL}}", &throttle)
         .replace("{{EXIT_TIMEOUT}}", &timeout)
         .replace("{{LOG_RETENTION_DAYS}}", &retention)
-        .replace("{{MIN_DISK_SPACE_GB}}", &min_disk)
-        // Update binary path to use mac-setup with update subcommand
-        .replace(
-            &format!("{}/Scripts/mac-setup", home),
-            &format!("{} update", binary_path),
-        );
+        .replace("{{MIN_DISK_SPACE_GB}}", &min_disk);
 
     // Write plist
     let plist_name = format!("com.{}.mac-setup.plist", user);

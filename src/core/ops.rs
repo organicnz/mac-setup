@@ -885,6 +885,80 @@ fn rotate_logs(config: &Config, stats: &mut HousekeepingStats) {
 }
 
 // ============================================================================
+// MISE UPGRADE
+// ============================================================================
+
+pub fn upgrade_mise(config: &Config) -> bool {
+    utils::log("🔧 Upgrading mise-managed runtimes and tools...", config);
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mise = format!("{}/.local/bin/mise", home);
+    let mise_bin = if std::path::Path::new(&mise).exists() {
+        mise
+    } else {
+        "mise".to_string()
+    };
+
+    match Command::new(&mise_bin).args(["upgrade"]).status() {
+        Ok(status) if status.success() => {
+            utils::log("✓ mise tools upgraded", config);
+            true
+        }
+        _ => {
+            utils::log("⚠ mise upgrade completed with warnings", config);
+            true // non-fatal
+        }
+    }
+}
+
+// ============================================================================
+// PIPX UPGRADE
+// ============================================================================
+
+pub fn upgrade_pipx(config: &Config) {
+    utils::log("🐍 Upgrading pipx apps...", config);
+
+    // Find mise-managed python
+    let home = std::env::var("HOME").unwrap_or_default();
+    let python_candidates = [
+        format!("{}/.local/share/mise/shims/python3", home),
+        "python3".to_string(),
+    ];
+
+    let python = python_candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .cloned()
+        .unwrap_or("python3".to_string());
+
+    // Check pipx is available
+    let has_pipx = Command::new(&python)
+        .args(["-m", "pipx", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !has_pipx {
+        utils::log("  ℹ pipx not available, skipping", config);
+        return;
+    }
+
+    match Command::new(&python)
+        .args(["-m", "pipx", "upgrade-all"])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            utils::log("✓ pipx apps upgraded", config);
+        }
+        _ => {
+            utils::log("⚠ pipx upgrade completed with warnings", config);
+        }
+    }
+}
+
+// ============================================================================
 // NPM UPDATE FUNCTION
 // ============================================================================
 
