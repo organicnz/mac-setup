@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// One-time provisioning: install Xcode CLT, Homebrew, and all packages from packages.toml
+    /// One-time provisioning: install Xcode CLT, stout, mise, and all packages from packages.toml
     Provision,
 
     /// Run the automated update daemon (brew update + upgrade + npm + cleanup)
@@ -188,8 +188,6 @@ fn run_update(config: &Config) {
     }
 
     update_stats.casks = ops::upgrade_casks(config);
-
-    log("\n", config);
     ops::remove_all_quarantine(config);
     ops::remove_all_formula_quarantine(config);
 

@@ -165,7 +165,7 @@ pub fn remove_all_formula_quarantine(config: &Config) -> usize {
     let prefix = match get_homebrew_prefix() {
         Some(p) => p,
         None => {
-            utils::log("  ⚠ Could not determine Homebrew prefix", config);
+            utils::log("  ⚠ Could not determine stout prefix", config);
             return 0;
         }
     };
@@ -174,14 +174,14 @@ pub fn remove_all_formula_quarantine(config: &Config) -> usize {
     let bin_path = std::path::Path::new(&bin_dir);
 
     if !bin_path.exists() {
-        utils::log("  ⚠ Homebrew bin directory not found", config);
+        utils::log("  ⚠ stout bin directory not found", config);
         return 0;
     }
 
     let entries = match std::fs::read_dir(bin_path) {
         Ok(e) => e,
         Err(_) => {
-            utils::log("  ⚠ Could not read Homebrew bin directory", config);
+            utils::log("  ⚠ Could not read stout bin directory", config);
             return 0;
         }
     };
@@ -640,7 +640,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
     let mut stats = HousekeepingStats::default();
 
     // 1. Clear Homebrew cache to free space
-    utils::log("  Clearing Homebrew cache...", config);
+    utils::log("  Clearing stout cache...", config);
     if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=30", "-s"])
         .output()
@@ -666,7 +666,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
     }
 
     // 3. Check Homebrew health
-    utils::log("  Checking Homebrew health...", config);
+    utils::log("  Checking stout health...", config);
     if let Ok(output) = Command::new(stout_cmd())
         .args(["doctor", "--quiet"])
         .output()

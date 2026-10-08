@@ -26,6 +26,7 @@ pub struct Manifest {
     pub casks: Option<PackageList>,
     pub mise: Option<MiseConfig>,
     pub pip: Option<PackageList>,
+    pub pipx: Option<PackageList>,
     pub npm: Option<NpmConfig>,
     pub go: Option<PackageList>,
 }
@@ -61,6 +62,7 @@ pub struct ProvisionStats {
     pub casks_installed: usize,
     pub runtimes_installed: usize,
     pub pip_installed: usize,
+    pub pipx_installed: usize,
     pub npm_installed: usize,
     pub go_installed: usize,
     pub skipped: usize,
@@ -75,6 +77,7 @@ impl std::fmt::Display for ProvisionStats {
         writeln!(f, "Casks installed:    {}", self.casks_installed)?;
         writeln!(f, "Runtimes (mise):    {}", self.runtimes_installed)?;
         writeln!(f, "Pip packages:       {}", self.pip_installed)?;
+        writeln!(f, "Pipx apps:          {}", self.pipx_installed)?;
         writeln!(f, "NPM globals:        {}", self.npm_installed)?;
         writeln!(f, "Go tools:           {}", self.go_installed)?;
         if self.skipped > 0 {
@@ -161,12 +164,17 @@ pub fn run(config: &Config) -> bool {
         install_pip_packages(&pip.packages, config, &mut stats);
     }
 
-    // 10. NPM globals (after mise has installed node)
+    // 10. Pipx apps (isolated Python apps)
+    if let Some(pipx) = &manifest.pipx {
+        install_pipx_packages(&pipx.packages, config, &mut stats);
+    }
+
+    // 11. NPM globals (after mise has installed node)
     if let Some(npm) = &manifest.npm {
         install_npm_globals(&npm.global, config, &mut stats);
     }
 
-    // 11. Go tools (after mise has installed go)
+    // 12. Go tools (after mise has installed go)
     if let Some(go) = &manifest.go {
         install_go_tools(&go.packages, config, &mut stats);
     }
@@ -627,6 +635,94 @@ fn install_npm_globals(packages: &[String], config: &Config, stats: &mut Provisi
             stats.failed += 1;
         }
     }
+}
+
+// ============================================================================
+// PIPX APPS (isolated Python applications)
+// ============================================================================
+
+fn install_pipx_packages(packages: &[String], config: &Config, stats: &mut ProvisionStats) {
+    if packages.is_empty() {
+        return;
+    }
+
+    // Prefer mise-managed python3 for pipx
+    let python = find_mise_python();
+
+    // Bootstrap pipx into the mise python if not present
+    let pipx_ok = Command::new(&python)
+        .args(["-m", "pipx", "--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !pipx_ok {
+        log("  Bootstrapping pipx...", config);
+        let _ = Command::new(&python)
+            .args(["-m", "pip", "install", "--quiet", "pipx"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    log(
+        &format!("\n📦 Installing {} pipx apps...", packages.len()),
+        config,
+    );
+
+    for pkg in packages {
+        // Check if already installed
+        let installed = Command::new(&python)
+            .args(["-m", "pipx", "list", "--short"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(pkg.as_str()))
+            .unwrap_or(false);
+
+        if installed {
+            log(&format!("  ✓ already installed: {}", pkg), config);
+            stats.skipped += 1;
+            continue;
+        }
+
+        log(&format!("  Installing {}...", pkg), config);
+        let ok = Command::new(&python)
+            .args(["-m", "pipx", "install", pkg.as_str()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if ok {
+            log(&format!("  ✓ installed: {}", pkg), config);
+            stats.pipx_installed += 1;
+        } else {
+            log(&format!("  ⚠ failed: {}", pkg), config);
+            stats.failed += 1;
+        }
+    }
+}
+
+fn find_mise_python() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    // Try mise shim first
+    let shim = format!("{}/.local/share/mise/shims/python3", home);
+    if Path::new(&shim).exists() {
+        return shim;
+    }
+    // Fall back to mise installs
+    let installs = format!("{}/.local/share/mise/installs/python", home);
+    if let Ok(mut entries) = std::fs::read_dir(&installs) {
+        if let Some(Ok(e)) = entries.next() {
+            let candidate = format!("{}/bin/python3", e.path().display());
+            if Path::new(&candidate).exists() {
+                return candidate;
+            }
+        }
+    }
+    "python3".to_string()
 }
 
 // ============================================================================

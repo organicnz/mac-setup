@@ -269,15 +269,26 @@ tools = [
   "deno@latest",
   "ruby@latest",
   "java@temurin-21",
-  "aqua:hashicorp/terraform@latest",  # stout index gap — use mise
+  "aqua:hashicorp/terraform@latest",
+  "aqua:hashicorp/packer@latest",
+  "aqua:getsentry/sentry-cli@latest",
+  "aqua:pulumi/pulumi@latest",
 ]
+
+# azure-cli managed via pipx (not in aqua registry)
+# install manually: python3 -m pipx install azure-cli
 
 [pip]
 packages = [
   "python-dotenv",
   "shodan",
   "mmh3",
-  "pipx",
+]
+
+# Isolated Python apps — installed via pipx into their own virtualenvs
+[pipx]
+packages = [
+  "azure-cli",
 ]
 
 [npm]
