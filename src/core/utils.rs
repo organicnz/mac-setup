@@ -23,9 +23,9 @@ impl Default for Config {
         fs::create_dir_all(&log_dir).unwrap_or(());
 
         Config {
-            log_file: log_dir.join("brew-updates.log"),
-            error_log: log_dir.join("brew-updates-error.log"),
-            lock_file: PathBuf::from("/tmp/brew-update.lock"),
+            log_file: log_dir.join("mac-setup.log"),
+            error_log: log_dir.join("mac-setup-error.log"),
+            lock_file: PathBuf::from("/tmp/mac-setup.lock"),
         }
     }
 }
@@ -74,7 +74,7 @@ pub fn send_notification(status: &str, message: &str) {
     let _ = Command::new("osascript")
         .arg("-e")
         .arg(format!(
-            "display notification \"{}\" with title \"Homebrew Update\" subtitle \"{}\"",
+            "display notification \"{}\" with title \"mac-setup Update\" subtitle \"{}\"",
             message, status
         ))
         .output();

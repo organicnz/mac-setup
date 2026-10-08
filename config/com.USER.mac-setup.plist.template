@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.{{USER}}.brew-update</string>
+    <string>com.{{USER}}.mac-setup</string>
     
     <key>ProgramArguments</key>
     <array>
-        <string>{{HOME}}/Scripts/brew-update</string>
+        <string>{{HOME}}/Scripts/mac-setup</string>
     </array>
     
     <key>StartCalendarInterval</key>
@@ -33,10 +33,10 @@
     </array>
     
     <key>StandardOutPath</key>
-    <string>{{HOME}}/Library/Logs/brew-update-stdout.log</string>
+    <string>{{HOME}}/Library/Logs/mac-setup-stdout.log</string>
     
     <key>StandardErrorPath</key>
-    <string>{{HOME}}/Library/Logs/brew-update-stderr.log</string>
+    <string>{{HOME}}/Library/Logs/mac-setup-stderr.log</string>
     
     <key>RunAtLoad</key>
     <false/>

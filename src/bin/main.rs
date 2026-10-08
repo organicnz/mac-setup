@@ -34,7 +34,7 @@ enum Commands {
     /// One-time provisioning: install Xcode CLT, stout, mise, and all packages from packages.toml
     Provision,
 
-    /// Run the automated update daemon (brew update + upgrade + npm + cleanup)
+    /// Run the automated update daemon (stout update + upgrade + npm + cleanup)
     Update,
 
     /// Remove broken casks, fix npm issues, and run housekeeping
@@ -240,9 +240,9 @@ fn run_update(config: &Config) {
     }
 
     log_freed!(
-        "Homebrew",
-        pre_cleanup_stats.brew_cache_freed,
-        post_cleanup_stats.brew_cache_freed
+        "stout",
+        pre_cleanup_stats.stout_cache_freed,
+        post_cleanup_stats.stout_cache_freed
     );
     log_freed!(
         "NPM",
@@ -758,7 +758,7 @@ fn run_install(config: &Config) {
     fs::copy(&target_bin, &dest_bin).expect("Failed to copy binary");
 
     // Read plist template
-    let template_content = fs::read_to_string("config/com.USER.brew-update.plist.template")
+    let template_content = fs::read_to_string("config/com.USER.mac-setup.plist.template")
         .expect("Failed to read plist template");
 
     // Schedule config
@@ -792,7 +792,7 @@ fn run_install(config: &Config) {
         .replace("{{MIN_DISK_SPACE_GB}}", &min_disk)
         // Update binary path to use mac-setup with update subcommand
         .replace(
-            &format!("{}/Scripts/brew-update", home),
+            &format!("{}/Scripts/mac-setup", home),
             &format!("{} update", binary_path),
         );
 

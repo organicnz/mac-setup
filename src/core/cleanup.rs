@@ -21,7 +21,7 @@ pub struct CleanupStats {
     pub bytes_freed: u64,
     pub files_removed: usize,
     pub dirs_removed: usize,
-    pub brew_cache_freed: u64,
+    pub stout_cache_freed: u64,
     pub npm_cache_freed: u64,
     pub cargo_cache_freed: u64,
     pub system_cache_freed: u64,
@@ -41,8 +41,8 @@ impl std::fmt::Display for CleanupStats {
         writeln!(f, "📊 Cleanup Summary:")?;
         writeln!(f, "   Total freed: {}MB", self.total_mb_freed())?;
         writeln!(f, "   Files removed: {}", self.files_removed)?;
-        if self.brew_cache_freed > 0 {
-            writeln!(f, "   stout: {}MB", self.brew_cache_freed / 1_000_000)?;
+        if self.stout_cache_freed > 0 {
+            writeln!(f, "   stout: {}MB", self.stout_cache_freed / 1_000_000)?;
         }
         if self.npm_cache_freed > 0 {
             writeln!(f, "   NPM: {}MB", self.npm_cache_freed / 1_000_000)?;
@@ -88,7 +88,7 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
     cleanup_temp_files(config, &mut stats);
     cleanup_stale_locks(config, &mut stats);
 
-    stats.bytes_freed = stats.brew_cache_freed
+    stats.bytes_freed = stats.stout_cache_freed
         + stats.npm_cache_freed
         + stats.cargo_cache_freed
         + stats.system_cache_freed;
@@ -116,7 +116,7 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(bytes) = parse_size_from_output(&stdout) {
-                stats.brew_cache_freed += bytes;
+                stats.stout_cache_freed += bytes;
             }
         }
     }
@@ -134,7 +134,7 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
     let home = std::env::var("HOME").unwrap_or_default();
 
     // Clean downloads directory completely - these are just cached .dmg/.pkg files
-    let downloads_dir = format!("{}/Library/Caches/Homebrew/downloads", home);
+    let downloads_dir = format!("{}/Library/Caches/stout/downloads", home);
     if Path::new(&downloads_dir).exists() {
         let freed = get_dir_size(&downloads_dir);
         if let Ok(entries) = std::fs::read_dir(&downloads_dir) {
@@ -151,11 +151,11 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
                 }
             }
         }
-        stats.brew_cache_freed += freed;
+        stats.stout_cache_freed += freed;
     }
 
     // Clean Cask cache completely as well
-    let cask_dir = format!("{}/Library/Caches/Homebrew/Cask", home);
+    let cask_dir = format!("{}/Library/Caches/stout/Cask", home);
     if Path::new(&cask_dir).exists() {
         let freed = get_dir_size(&cask_dir);
         if let Ok(entries) = std::fs::read_dir(&cask_dir) {
@@ -172,12 +172,12 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
                 }
             }
         }
-        stats.brew_cache_freed += freed;
+        stats.stout_cache_freed += freed;
     }
 
-    let log_dir = format!("{}/Library/Logs/Homebrew", home);
+    let log_dir = format!("{}/Library/Logs/stout", home);
     let freed = clean_old_files(&log_dir, 7, stats);
-    stats.brew_cache_freed += freed;
+    stats.stout_cache_freed += freed;
 }
 
 fn cleanup_npm(config: &Config, stats: &mut CleanupStats, home: &str) {
@@ -744,7 +744,7 @@ fn cleanup_temp_files(config: &Config, stats: &mut CleanupStats) {
 fn cleanup_stale_locks(config: &Config, stats: &mut CleanupStats) {
     utils::log("  🔒 Cleaning stale locks...", config);
 
-    let lock_patterns = [("/tmp", "homebrew"), ("/tmp", "brew-"), ("/tmp", ".npm-")];
+    let lock_patterns = [("/tmp", "stout"), ("/tmp", "brew-"), ("/tmp", ".npm-")];
 
     for (dir, pattern) in &lock_patterns {
         if let Ok(entries) = std::fs::read_dir(dir) {

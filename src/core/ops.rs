@@ -157,7 +157,7 @@ pub fn remove_all_quarantine(config: &Config) -> usize {
     count
 }
 
-/// Remove quarantine attribute from ALL Homebrew formula binaries
+/// Remove quarantine attribute from ALL stout formula binaries
 /// This prevents Gatekeeper "Apple could not verify" warnings for CLI tools
 pub fn remove_all_formula_quarantine(config: &Config) -> usize {
     utils::log("🔓 Removing quarantine from formula binaries...", config);
@@ -617,7 +617,7 @@ pub struct HousekeepingStats {
     pub deps_removed: usize,
     pub logs_rotated: usize,
     pub locks_cleared: usize,
-    pub brew_healthy: bool,
+    pub stout_healthy: bool,
     pub doctor_warnings: usize,
     pub disk_available: String,
 }
@@ -639,7 +639,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
     utils::log("📋 Running pre-task housekeeping...", config);
     let mut stats = HousekeepingStats::default();
 
-    // 1. Clear Homebrew cache to free space
+    // 1. Clear stout cache to free space
     utils::log("  Clearing stout cache...", config);
     if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=30", "-s"])
@@ -665,7 +665,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
         }
     }
 
-    // 3. Check Homebrew health
+    // 3. Check stout health
     utils::log("  Checking stout health...", config);
     if let Ok(output) = Command::new(stout_cmd())
         .args(["doctor", "--quiet"])
@@ -675,10 +675,10 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
             .lines()
             .filter(|l| !l.is_empty())
             .count();
-        stats.brew_healthy = output.status.success();
-        if !stats.brew_healthy {
+        stats.stout_healthy = output.status.success();
+        if !stats.stout_healthy {
             utils::log(
-                "  ⚠ brew doctor found issues (run 'brew doctor' for details)",
+                "  ⚠ stout doctor found issues (run 'stout doctor' for details)",
                 config,
             );
         }
@@ -713,7 +713,7 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
     let mut stats = HousekeepingStats::default();
 
     // 1. Aggressive cache cleanup (older files)
-    utils::log("  Deep cleaning Homebrew cache...", config);
+    utils::log("  Deep cleaning stout cache...", config);
     if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=7", "-s"])
         .output()
@@ -750,8 +750,8 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
     utils::log("  Rotating old logs...", config);
     rotate_logs(config, &mut stats);
 
-    // 6. Run garbage collection on Homebrew git repos
-    utils::log("  Optimizing Homebrew repos...", config);
+    // 6. Run garbage collection on stout package index
+    utils::log("  Optimizing stout index...", config);
     let _ = Command::new(stout_cmd())
         .args(["update", "--auto-update"])
         .output();
@@ -784,7 +784,7 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
 }
 
 /// Simple cleanup (for backward compatibility)
-pub fn cleanup_brew(config: &Config) {
+pub fn cleanup_stout_legacy(config: &Config) {
     utils::log("Running cleanup...", config);
     let _ = Command::new(stout_cmd())
         .args(["cleanup", "--prune=30", "-s"])
@@ -822,7 +822,7 @@ fn clear_download_caches(stats: &mut HousekeepingStats) {
         return;
     }
 
-    let cache_dir = format!("{}/Library/Caches/Homebrew/downloads", home);
+    let cache_dir = format!("{}/Library/Caches/stout/downloads", home);
     if std::path::Path::new(&cache_dir).exists() {
         if let Ok(entries) = std::fs::read_dir(&cache_dir) {
             for entry in entries.flatten() {
@@ -846,9 +846,7 @@ fn clear_stale_locks(stats: &mut HousekeepingStats) {
     if let Ok(entries) = std::fs::read_dir(temp_path) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if (name.starts_with("homebrew") || name.starts_with("brew-"))
-                && name.ends_with(".lock")
-            {
+            if (name.starts_with("stout") || name.starts_with("brew-")) && name.ends_with(".lock") {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
@@ -869,7 +867,7 @@ fn rotate_logs(config: &Config, stats: &mut HousekeepingStats) {
         if let Ok(entries) = std::fs::read_dir(log_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("brew-update") && name.ends_with(".log.old") {
+                if name.starts_with("mac-setup") && name.ends_with(".log.old") {
                     if let Ok(metadata) = entry.metadata() {
                         if let Ok(modified) = metadata.modified() {
                             if let Ok(elapsed) = modified.elapsed() {

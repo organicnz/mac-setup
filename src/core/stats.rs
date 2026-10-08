@@ -134,7 +134,7 @@ impl fmt::Display for UpdateStats {
             for app in &self.casks.skipped_invalid {
                 writeln!(f, "    - {}", app)?;
             }
-            writeln!(f, "    → Check homebrew-cask issues or update Homebrew")?;
+            writeln!(f, "    → Check stout-index or run stout update")?;
         }
 
         if !self.casks.skipped_other.is_empty() {
