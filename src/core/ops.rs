@@ -58,7 +58,7 @@ fn get_cask_app_path(cask_name: &str) -> Option<String> {
 }
 
 /// Get the stout/Homebrew Cellar prefix directory (stout uses same layout)
-fn get_homebrew_prefix() -> Option<String> {
+fn get_stout_prefix() -> Option<String> {
     // Try `stout --prefix` first
     if let Ok(output) = Command::new(stout_cmd()).arg("--prefix").output() {
         if output.status.success() {
@@ -162,7 +162,7 @@ pub fn remove_all_quarantine(config: &Config) -> usize {
 pub fn remove_all_formula_quarantine(config: &Config) -> usize {
     utils::log("🔓 Removing quarantine from formula binaries...", config);
 
-    let prefix = match get_homebrew_prefix() {
+    let prefix = match get_stout_prefix() {
         Some(p) => p,
         None => {
             utils::log("  ⚠ Could not determine stout prefix", config);
