@@ -1,16 +1,16 @@
-# Lefthook configuration for brew-auto-update
+# Lefthook configuration for mac-setup
 # https://github.com/evilmartians/lefthook
 
 pre-commit:
   parallel: true
   
   commands:
-    # Format Code
+    # Format check
     cargo-fmt:
       glob: "**/*.rs"
       run: cargo fmt --check
 
-    # Lint Code
+    # Lint
     cargo-clippy:
       glob: "**/*.rs"
       run: cargo clippy -- -D warnings
@@ -18,20 +18,19 @@ pre-commit:
     # Validate plist template
     plist-check:
       glob: "config/*.plist.template"
-      run: cargo run -q --bin audit -- plist {staged_files}
+      run: cargo run -q -- audit plist {staged_files}
     
     # Check for secrets/tokens
     secrets-check:
       glob: "*"
-      run: cargo run -q --bin audit -- secrets {staged_files}
+      run: cargo run -q -- audit secrets {staged_files}
     
     # Markdown linting
     markdown-lint:
       glob: "*.md"
-      run: cargo run -q --bin audit -- markdown {staged_files}
+      run: cargo run -q -- audit markdown {staged_files}
 
 pre-push:
   commands:
-    # Run full test suite before push
     test:
       run: cargo test

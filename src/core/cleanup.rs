@@ -1,10 +1,19 @@
 //! Comprehensive cleanup module for development environments
-//! Handles Homebrew, NPM, Cargo, and system caches
+//! Handles stout (formulae/casks), NPM, Cargo, and system caches
 
 use super::utils::{self, Config};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
+
+fn stout_cmd() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local = format!("{}/.local/bin/stout", home);
+    if Path::new(&local).exists() {
+        return local;
+    }
+    "stout".to_string()
+}
 
 /// Comprehensive cleanup statistics
 #[derive(Debug, Default)]
@@ -33,7 +42,7 @@ impl std::fmt::Display for CleanupStats {
         writeln!(f, "   Total freed: {}MB", self.total_mb_freed())?;
         writeln!(f, "   Files removed: {}", self.files_removed)?;
         if self.brew_cache_freed > 0 {
-            writeln!(f, "   Homebrew: {}MB", self.brew_cache_freed / 1_000_000)?;
+            writeln!(f, "   stout: {}MB", self.brew_cache_freed / 1_000_000)?;
         }
         if self.npm_cache_freed > 0 {
             writeln!(f, "   NPM: {}MB", self.npm_cache_freed / 1_000_000)?;
@@ -65,7 +74,7 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
 
     utils::log("🧹 Running comprehensive cleanup...", config);
 
-    cleanup_homebrew(config, &mut stats, aggressive);
+    cleanup_stout(config, &mut stats, aggressive);
     cleanup_npm(config, &mut stats, &home);
     cleanup_cargo(config, &mut stats, &home);
     cleanup_system_caches(config, &mut stats, &home, aggressive);
@@ -96,11 +105,11 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
     stats
 }
 
-fn cleanup_homebrew(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
-    utils::log("  🍺 Cleaning Homebrew...", config);
+fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
+    utils::log("  🦀 Cleaning stout...", config);
 
     // Always use --prune=all to remove all cached downloads (they can be re-downloaded)
-    if let Ok(output) = Command::new("brew")
+    if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=all", "-s"])
         .output()
     {
@@ -112,7 +121,7 @@ fn cleanup_homebrew(config: &Config, stats: &mut CleanupStats, _aggressive: bool
         }
     }
 
-    if let Ok(output) = Command::new("brew").arg("autoremove").output() {
+    if let Ok(output) = Command::new(stout_cmd()).arg("autoremove").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stats.files_removed += stdout

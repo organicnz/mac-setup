@@ -1,0 +1,144 @@
+# mac-setup package manifest
+# Edit this file to customize what gets installed during `mac-setup provision`
+#
+# Runtimes (node, python, go, deno, ruby, etc.) are managed by mise — see [mise] section.
+# Formulae and casks are installed via stout (Rust-based Homebrew-compatible client).
+
+[taps]
+taps = [
+  "homebrew/cask-versions",
+  "teamookla/speedtest",
+  "cloudflare/cloudflare",
+  "hashicorp/tap",
+  "homebrew/services",
+  "homebrew/cask-fonts",
+  "supabase/tap",
+]
+
+[formulae]
+packages = [
+  "bfg",
+  "imagemagick",
+  "wget",
+  "tree",
+  "git",
+  "htop",
+  "jq",
+  "flutter",
+  "speedtest-cli",
+  "dart-sdk",
+  "supabase/tap/supabase",
+  "doctl",
+  "ansible",
+  "hashicorp/tap/packer",
+  "terraform",
+  "awscurl",
+  "nmap",
+  "unzip",
+  "nginx",
+  "openjdk",
+  "font-inconsolata",
+  "postgresql",
+  "yarn",
+  "gcalcli",
+  "gettext",
+  "flyctl",
+  "cocoapods",
+  "clasp",
+  "pidof",
+  "k9s",
+  "ffmpeg",
+  "gradle",
+  "curl",
+  "openapi-generator",
+  "cloudflare/cloudflare/cloudflared",
+  "azure-cli",
+  "mtr",
+  "lolcat",
+  "libimobiledevice",
+  "autossh",
+  "openssh",
+  "aircrack-ng",
+  "hashcat",
+]
+
+[casks]
+packages = [
+  "evernote",
+  "todoist",
+  "xmind",
+  "rapidapi",
+  "brave-browser",
+  "whatsapp",
+  "obsidian",
+  "github",
+  "firefox",
+  "wireshark",
+  "warp",
+  "protonvpn",
+  "cloudflare-warp",
+  "rustdesk",
+  "cyberduck",
+  "docker",
+  "termius",
+  "steam",
+  "google-chrome",
+  "bitwarden",
+  "the-unarchiver",
+  "pingplotter",
+  "zoom",
+  "visual-studio-code",
+  "raycast",
+  "vlc",
+  "arc",
+  "ngrok",
+  "pgadmin4",
+  "burp-suite",
+  "postman",
+  "google-cloud-sdk",
+  "chatgpt",
+  "spotify",
+  "figma",
+  "slack",
+  "android-studio",
+  "iterm2",
+  "discord",
+  "google-drive",
+  "notion",
+  "loom",
+  "balenaetcher",
+  "deepl",
+  "grammarly",
+  "tor-browser",
+  "wireshark",
+  "vmware-fusion",
+  "geekbench",
+  "blackmagic-disk-speed-test",
+]
+
+# Language runtimes — managed by mise (not stout)
+# mise installs pre-compiled binaries per-project or globally
+[mise]
+tools = [
+  "node@lts",
+  "python@3.12",
+  "go@latest",
+  "deno@latest",
+]
+
+[pip]
+packages = [
+  "python-dotenv",
+  "shodan",
+  "mmh3",
+]
+
+[npm]
+global = [
+  "imgproxy",
+]
+
+[go]
+packages = [
+  "github.com/tomnomnom/httprobe@master",
+]

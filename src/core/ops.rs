@@ -3,17 +3,28 @@ use super::{
     utils::{self, Config},
 };
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
+
+/// Returns the path to the stout binary, preferring ~/.local/bin/stout
+fn stout_cmd() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local = format!("{}/.local/bin/stout", home);
+    if Path::new(&local).exists() {
+        return local;
+    }
+    "stout".to_string()
+}
 
 // ============================================================================
 // QUARANTINE REMOVAL HELPERS
 // ============================================================================
 
-/// Get the application path for a cask by querying brew info
+/// Get the application path for a cask by querying stout info
 fn get_cask_app_path(cask_name: &str) -> Option<String> {
-    let output = Command::new("brew")
+    let output = Command::new(stout_cmd())
         .args(["info", "--cask", cask_name, "--json=v2"])
         .output()
         .ok()?;
@@ -46,10 +57,10 @@ fn get_cask_app_path(cask_name: &str) -> Option<String> {
     None
 }
 
-/// Get the Homebrew prefix directory
+/// Get the stout/Homebrew Cellar prefix directory (stout uses same layout)
 fn get_homebrew_prefix() -> Option<String> {
-    // Try `brew --prefix` first
-    if let Ok(output) = Command::new("brew").arg("--prefix").output() {
+    // Try `stout --prefix` first
+    if let Ok(output) = Command::new(stout_cmd()).arg("--prefix").output() {
         if output.status.success() {
             let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !prefix.is_empty() && std::path::Path::new(&prefix).exists() {
@@ -92,7 +103,7 @@ pub fn remove_all_quarantine(config: &Config) -> usize {
     utils::log("🔓 Removing quarantine from all cask apps...", config);
 
     // Get list of all installed casks
-    let output = match Command::new("brew").args(["list", "--cask"]).output() {
+    let output = match Command::new(stout_cmd()).args(["list", "--cask"]).output() {
         Ok(o) => o,
         Err(_) => {
             utils::log("  ⚠ Could not list installed casks", config);
@@ -238,7 +249,7 @@ fn attempt_recovery(cask_name: &str, original_app_path: Option<&str>, config: &C
             );
 
             // Try to reinstall the cask to restore the app
-            match Command::new("brew")
+            match Command::new(stout_cmd())
                 .args(["reinstall", "--cask", cask_name])
                 .output()
             {
@@ -256,7 +267,7 @@ fn attempt_recovery(cask_name: &str, original_app_path: Option<&str>, config: &C
                 _ => {
                     utils::log(
                         &format!(
-                            "  ✗ Failed to recover {}. Manual reinstall required: brew reinstall --cask {}",
+                            "  ✗ Failed to recover {}. Manual reinstall: stout reinstall --cask {}",
                             cask_name, cask_name
                         ),
                         config,
@@ -321,9 +332,9 @@ fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<Output, Stri
     }
 }
 
-pub fn check_brew(config: &Config) -> bool {
+pub fn check_stout(config: &Config) -> bool {
     if Command::new("which")
-        .arg("brew")
+        .arg("stout")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -331,27 +342,31 @@ pub fn check_brew(config: &Config) -> bool {
         return true;
     }
 
-    // Check common paths
-    let paths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
-    for path in paths {
+    // Check common paths (stout also installs to ~/.local/bin)
+    let home = std::env::var("HOME").unwrap_or_default();
+    let paths = [
+        format!("{}/.local/bin/stout", home),
+        "/usr/local/bin/stout".to_string(),
+    ];
+    for path in &paths {
         if std::path::Path::new(path).exists() {
             return true;
         }
     }
 
-    utils::log_error("Homebrew not found", config);
+    utils::log_error("stout not found", config);
     false
 }
 
-pub fn update_homebrew(config: &Config) -> bool {
-    utils::log("Updating Homebrew...", config);
-    match Command::new("brew").arg("update").status() {
+pub fn update_stout(config: &Config) -> bool {
+    utils::log("Updating stout index...", config);
+    match Command::new(stout_cmd()).arg("update").status() {
         Ok(status) if status.success() => {
-            utils::log("✓ Homebrew updated successfully", config);
+            utils::log("✓ stout index updated", config);
             true
         }
         _ => {
-            utils::log_error("Failed to update Homebrew", config);
+            utils::log_error("Failed to update stout index", config);
             false
         }
     }
@@ -361,7 +376,7 @@ pub fn upgrade_formulae(config: &Config) -> bool {
     utils::log("Checking for outdated formulae...", config);
 
     // Count outdated
-    let outdated_count = Command::new("brew")
+    let outdated_count = Command::new(stout_cmd())
         .args(["outdated", "--formula"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
@@ -373,7 +388,10 @@ pub fn upgrade_formulae(config: &Config) -> bool {
     }
 
     utils::log(&format!("Upgrading {} formulae...", outdated_count), config);
-    match Command::new("brew").args(["upgrade", "--formula"]).status() {
+    match Command::new(stout_cmd())
+        .args(["upgrade", "--formula"])
+        .status()
+    {
         Ok(status) if status.success() => {
             utils::log("✓ Formulae upgraded successfully", config);
             true
@@ -391,7 +409,7 @@ pub fn upgrade_casks(config: &Config) -> CaskStats {
     let mut stats = CaskStats::default();
 
     // Get list of outdated casks
-    let outdated_output = Command::new("brew")
+    let outdated_output = Command::new(stout_cmd())
         .args(["outdated", "--cask", "--greedy"])
         .output();
 
@@ -439,7 +457,7 @@ pub fn upgrade_casks(config: &Config) -> CaskStats {
         utils::log(&format!("  Upgrading {}...", cask_name), config);
 
         match run_with_timeout(
-            Command::new("brew").args(["upgrade", "--cask", cask_name]),
+            Command::new(stout_cmd()).args(["upgrade", "--cask", cask_name]),
             CASK_UPGRADE_TIMEOUT_SECS,
         ) {
             Ok(output) if output.status.success() => {
@@ -524,7 +542,7 @@ pub fn upgrade_casks(config: &Config) -> CaskStats {
                         config,
                     );
                     match run_with_timeout(
-                        Command::new("brew").args(["upgrade", "--cask", "--force", cask_name]),
+                        Command::new(stout_cmd()).args(["upgrade", "--cask", "--force", cask_name]),
                         CASK_UPGRADE_TIMEOUT_SECS,
                     ) {
                         Ok(retry_output) if retry_output.status.success() => {
@@ -623,7 +641,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 1. Clear Homebrew cache to free space
     utils::log("  Clearing Homebrew cache...", config);
-    if let Ok(output) = Command::new("brew")
+    if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=30", "-s"])
         .output()
     {
@@ -637,7 +655,7 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 2. Remove unused dependencies
     utils::log("  Removing unused dependencies...", config);
-    if let Ok(output) = Command::new("brew").arg("autoremove").output() {
+    if let Ok(output) = Command::new(stout_cmd()).arg("autoremove").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stats.deps_removed = stdout
@@ -649,7 +667,10 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 3. Check Homebrew health
     utils::log("  Checking Homebrew health...", config);
-    if let Ok(output) = Command::new("brew").args(["doctor", "--quiet"]).output() {
+    if let Ok(output) = Command::new(stout_cmd())
+        .args(["doctor", "--quiet"])
+        .output()
+    {
         stats.doctor_warnings = String::from_utf8_lossy(&output.stderr)
             .lines()
             .filter(|l| !l.is_empty())
@@ -693,7 +714,7 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 1. Aggressive cache cleanup (older files)
     utils::log("  Deep cleaning Homebrew cache...", config);
-    if let Ok(output) = Command::new("brew")
+    if let Ok(output) = Command::new(stout_cmd())
         .args(["cleanup", "--prune=7", "-s"])
         .output()
     {
@@ -707,7 +728,7 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 2. Remove unused dependencies again (updates may have orphaned some)
     utils::log("  Removing newly orphaned dependencies...", config);
-    if let Ok(output) = Command::new("brew").arg("autoremove").output() {
+    if let Ok(output) = Command::new(stout_cmd()).arg("autoremove").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stats.deps_removed = stdout
@@ -731,7 +752,7 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
 
     // 6. Run garbage collection on Homebrew git repos
     utils::log("  Optimizing Homebrew repos...", config);
-    let _ = Command::new("brew")
+    let _ = Command::new(stout_cmd())
         .args(["update", "--auto-update"])
         .output();
 
@@ -765,10 +786,10 @@ pub fn post_housekeeping(config: &Config) -> HousekeepingStats {
 /// Simple cleanup (for backward compatibility)
 pub fn cleanup_brew(config: &Config) {
     utils::log("Running cleanup...", config);
-    let _ = Command::new("brew")
+    let _ = Command::new(stout_cmd())
         .args(["cleanup", "--prune=30", "-s"])
         .status();
-    let _ = Command::new("brew").arg("autoremove").status();
+    let _ = Command::new(stout_cmd()).arg("autoremove").status();
     utils::log("✓ Cleanup completed", config);
 }
 

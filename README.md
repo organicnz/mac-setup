@@ -1,82 +1,93 @@
-# Homebrew Auto-Update
+# mac-setup
 
 [![macOS](https://img.shields.io/badge/macOS-10.14+-blue.svg)](https://www.apple.com/macos/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Homebrew](https://img.shields.io/badge/Homebrew-required-orange.svg)](https://brew.sh)
+[![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://rust-lang.org)
 
-Production-grade automated Homebrew and NPM package management for **macOS only**. Runs 3x daily via launchd with intelligent pre-flight checks, differential logging, and graceful error handling.
+Unified macOS package management in a single native Rust binary.  
+One tool to provision a fresh Mac and keep it updated automatically.
 
-> ⚠️ **macOS Only**: This tool uses macOS-specific features (launchd, plist files) and will not work on Linux or Windows.
+> ⚠️ **macOS Only**: Uses macOS-specific features (launchd, plist files, osascript notifications).
 
-## Table of Contents
+---
 
-- [Features](#features)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Management Commands](#management-commands)
-- [Troubleshooting](#troubleshooting)
-- [Requirements](#requirements)
-- [Development](#development)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
+## Subcommands
 
-## Features
+| Command | Description |
+|---------|-------------|
+| `mac-setup provision` | One-time setup: Xcode CLT → Homebrew → all packages from `packages.toml` |
+| `mac-setup update` | Automated update daemon: brew + casks + npm + cleanup |
+| `mac-setup install` | Install/reinstall the launchd agent (runs `update` 3x daily) |
+| `mac-setup fix` | Remove broken casks, fix npm issues, housekeeping |
+| `mac-setup audit` | Pre-commit checks: plist validation, secrets scanning, markdown linting |
+| `mac-setup setup` | Dev environment setup: lefthook, clippy, rustfmt, git hooks |
+| `mac-setup cleanup` | Run comprehensive system cleanup standalone |
 
-✅ **Smart Pre-flight Checks**
-- Network connectivity verification
-- Disk space validation (minimum 5GB)
-- Homebrew installation check
+---
 
-✅ **Comprehensive Updates**
-- Update Homebrew itself
-- Upgrade all formulae
-- Upgrade all casks (with --greedy flag)
-- Cleanup old versions (30-day retention)
-- Autoremove unused dependencies
+## Quick Start
 
-✅ **NPM Integration**
-- Checks for global npm installation
-- Updates all global npm packages
-- Skips gracefully if npm is missing
+### Fresh Mac Setup
 
-✅ **Robust Error Handling**
-- Lock file prevents concurrent runs
-- Automatic stale lock removal (>2 hours)
-- Process cleanup on exit/interrupt
-- Graceful failure handling
+```bash
+git clone https://github.com/organicnz/mac-setup.git
+cd mac-setup
+cargo build --release
+./target/release/mac-setup provision
+```
 
-✅ **Intelligent Logging**
-- Differential logging (only logs changes)
-- Automatic log rotation at 10MB
-- 24-hour log retention
-- Timestamped entries
-- Separate error log
+This installs Xcode CLT, Homebrew, all formulae, casks, pip packages, npm globals, and go tools
+defined in `packages.toml`.
 
-✅ **System Integration**
-- Runs 3x daily (9 AM, 3 PM, 9 PM)
-- Low priority I/O and CPU
-- Desktop notifications on completion
-- Health checks and summaries
+### Install the Auto-Update Daemon
 
-## How It Works
+```bash
+./target/release/mac-setup install
+```
 
-This tool uses **launchd** (macOS's native task scheduler) to run a compiled **Rust binary** on schedule.
+The daemon runs `mac-setup update` at 9 AM, 3 PM, and 9 PM via launchd.
 
-### Architecture
+---
+
+## packages.toml
+
+All installed packages are defined in `packages.toml` at the repo root. Edit it to customize
+what gets provisioned on a new machine.
+
+```toml
+[taps]
+taps = ["homebrew/core", "hashicorp/tap", ...]
+
+[formulae]
+packages = ["git", "wget", "terraform", ...]
+
+[casks]
+packages = ["docker", "firefox", "slack", ...]
+
+[pip]
+packages = ["python-dotenv", "shodan", ...]
+
+[npm]
+global = ["imgproxy"]
+
+[go]
+packages = ["github.com/tomnomnom/httprobe@master"]
+```
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         macOS launchd                          │
-│  (reads ~/Library/LaunchAgents/com.USER.brew-update.plist)     │
+│                         macOS launchd                           │
+│  (reads ~/Library/LaunchAgents/com.USER.mac-setup.plist)        │
 └─────────────────────────────────────────────────────────────────┘
                               │
-                              ▼ Executes at 9AM, 3PM, 9PM
+                              ▼  Runs at 9 AM, 3 PM, 9 PM
 ┌─────────────────────────────────────────────────────────────────┐
-│                   ~/Scripts/brew-update                         │
+│                  ~/Scripts/mac-setup update                     │
 │              (Native ARM64/x86 Mach-O binary)                   │
-│                   Compiled from Rust source                     │
 └─────────────────────────────────────────────────────────────────┘
                               │
           ┌───────────────────┼───────────────────┐
@@ -87,286 +98,129 @@ This tool uses **launchd** (macOS's native task scheduler) to run a compiled **R
     └──────────┘       └──────────────┘    └───────────┘
 ```
 
-### Why launchd (not cron)?
+---
 
-macOS deprecated cron in favor of **launchd**, which offers:
-- **Power-aware scheduling** — skips runs when on battery if configured
-- **Missed run recovery** — runs immediately after wake if a schedule was missed
-- **Better process management** — proper signals, resource limits, sandboxing
-- **Native integration** — works with macOS login/logout seamlessly
+## Update Daemon Features
 
-### The plist Configuration
+- **Pre-flight checks**: network connectivity, disk space (min 5GB)
+- **Lock file**: prevents concurrent runs
+- **Homebrew**: `brew update` → upgrade formulae → upgrade casks (with timeout/recovery)
+- **Quarantine removal**: strips `com.apple.quarantine` from all cask apps and formula binaries
+- **NPM**: updates all global npm packages, detects invalid package names
+- **Comprehensive cleanup**: brew cache, npm/cargo/system caches, browser caches, Xcode, temp files
+- **Desktop notifications**: success/warning/skip via osascript
+- **Logging**: timestamped, auto-rotated, separate error log
 
-The plist file tells launchd when and how to run the binary:
+---
 
-```xml
-<key>ProgramArguments</key>
-<array>
-    <string>/Users/YOUR_USERNAME/Scripts/brew-update</string>
-</array>
-
-<key>StartCalendarInterval</key>
-<array>
-    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
-</array>
-```
-
-The binary is **not a script** — it's compiled native machine code (Mach-O ARM64 on Apple Silicon, x86_64 on Intel), making it fast and dependency-free at runtime.
-
-## Installation
-
-### Quick Install (Fully Automated)
+## Logs
 
 ```bash
-# Clone the repository
-git clone https://github.com/organicnz/brew-auto-update.git
-cd brew-auto-update
-
-# Run the installer
-cargo run --release --bin install
-```
-
-The installer automatically:
-- Detects your username
-- Detects Homebrew installation path
-- Creates necessary directories
-- Installs and configures everything
-- Runs an initial test
-
-### Manual Install
-
-1. **Install and Build:**
-```bash
-cargo run --release --bin install
-# This will compile the Rust binary and install it to ~/Scripts/brew-update
-```
-
-2. **Install the launchd plist:**
-```bash
-# Replace USER with your username
-sed "s/USER/$(whoami)/g" com.organic.brew-update.plist > ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-
-# Load the agent
-launchctl load ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-```
-
-3. **Verify installation:**
-```bash
-launchctl list | grep brew-update
-```
-
-## Configuration
-
-### Installation-Time Variables
-
-Customize installation by setting these before running `./install.sh`:
-
-```bash
-# Schedule (default: 9 AM, 3 PM, 9 PM)
-export BREW_UPDATE_HOUR1=8
-export BREW_UPDATE_MINUTE1=0
-export BREW_UPDATE_HOUR2=14
-export BREW_UPDATE_MINUTE2=30
-export BREW_UPDATE_HOUR3=20
-export BREW_UPDATE_MINUTE3=0
-
-# System settings
-export BREW_UPDATE_NICE_LEVEL=10              # CPU priority (0-20, higher = lower priority)
-export BREW_UPDATE_THROTTLE_INTERVAL=300      # Min seconds between runs
-export BREW_UPDATE_EXIT_TIMEOUT=7200          # Max runtime (2 hours)
-export BREW_UPDATE_LOG_RETENTION_DAYS=1       # Keep logs for 24 hours
-export BREW_UPDATE_MIN_DISK_SPACE_GB=5        # Minimum free space required
-
-# Then install
-cargo run --release --bin install
-```
-
-### Runtime Variables
-
-These can be set in the script or plist environment:
-
-```bash
-export LOG_DIR="$HOME/Library/Logs"           # Log directory
-export LOG_RETENTION_DAYS=1                    # Keep logs for 24 hours
-export MIN_DISK_SPACE_GB=5                     # Minimum free space required
-export LOCK_TIMEOUT=7200                       # Max runtime (2 hours)
-export MAX_LOG_SIZE=10485760                   # Log rotation size (10MB)
-```
-
-### Schedule
-
-Edit the plist file to change run times. Default schedule:
-- 9:00 AM
-- 3:00 PM
-- 9:00 PM
-
-```xml
-<key>StartCalendarInterval</key>
-<array>
-    <dict>
-        <key>Hour</key>
-        <integer>9</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    <!-- Add more time slots as needed -->
-</array>
-```
-
-## Usage
-
-### Automatic Runs
-Once installed, the script runs automatically on schedule. No action needed!
-
-### Manual Run
-```bash
-~/Scripts/brew-update
-```
-
-### View Logs
-```bash
-# Main log
 tail -f ~/Library/Logs/brew-updates.log
-
-# Error log
 tail -f ~/Library/Logs/brew-updates-error.log
-
-# Launchd output
-tail -f ~/Library/Logs/brew-update-stdout.log
 ```
 
-### Management Commands
+---
+
+## Launchd Management
 
 ```bash
 # Check status
-launchctl list | grep brew-update
-
-# Disable automatic runs
-launchctl unload ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-
-# Enable automatic runs
-launchctl load ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
+launchctl list | grep mac-setup
 
 # Trigger immediate run
-launchctl start com.$(whoami).brew-update
+launchctl start com.$(whoami).mac-setup
 
-# View next scheduled run
-launchctl print gui/$(id -u)/com.$(whoami).brew-update | grep next
+# Disable
+launchctl unload ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
+
+# Enable
+launchctl load ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
 ```
 
-## Troubleshooting
+---
 
-### Updates aren't running
-```bash
-# Check if loaded
-launchctl list | grep brew-update
-
-# Check for errors
-tail ~/Library/Logs/brew-update-stderr.log
-
-# Verify binary permissions
-ls -la ~/Scripts/brew-update
-```
-
-### Lock file stuck
-```bash
-# Remove manually (script auto-removes stale locks >2 hours)
-rm -f /tmp/brew-update.lock
-```
-
-### No network notification
-The script will skip updates and notify you if no network is available. This is normal behavior.
-
-## Uninstallation
+## Cleanup Options
 
 ```bash
-# Unload the agent
-launchctl unload ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
+# Standard cleanup
+mac-setup cleanup
 
-# Remove files
-rm ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-rm ~/Scripts/brew-update
-rm -rf ~/Library/Logs/brew-update*
+# Aggressive (removes more cached data)
+mac-setup cleanup --aggressive
 ```
+
+---
+
+## Audit (Pre-commit Hooks)
+
+```bash
+mac-setup audit plist config/com.USER.brew-update.plist.template
+mac-setup audit secrets src/bin/main.rs
+mac-setup audit markdown README.md
+```
+
+---
+
+## Installation Variables
+
+Customize the launchd schedule before running `mac-setup install`:
+
+```bash
+export BREW_UPDATE_HOUR1=8    BREW_UPDATE_MINUTE1=0
+export BREW_UPDATE_HOUR2=14   BREW_UPDATE_MINUTE2=30
+export BREW_UPDATE_HOUR3=20   BREW_UPDATE_MINUTE3=0
+export BREW_UPDATE_NICE_LEVEL=10
+export BREW_UPDATE_MIN_DISK_SPACE_GB=5
+mac-setup install
+```
+
+---
 
 ## Requirements
 
-- **macOS 10.14 (Mojave) or later** (required)
-- Homebrew installed ([install here](https://brew.sh))
-- Rust/Cargo installed (for building)
-- Write access to `~/Library/Logs`
+- macOS 10.14+ (Mojave or later)
+- Rust/Cargo (for building)
+- Homebrew (installed automatically by `provision`)
 
-> **Note**: This tool is designed exclusively for macOS and uses launchd for scheduling. It will not work on Linux or Windows systems.
-
-## Security
-
-- Runs as user (not root)
-- No sudo required
-- Sandboxed to user environment
-- Safe PATH configuration
+---
 
 ## Development
 
-### Setup Development Environment
-
 ```bash
-# Clone the repo
-git clone https://github.com/organicnz/brew-auto-update.git
-cd brew-auto-update
+# Setup dev tools
+cargo run --release -- setup
 
-# Setup development tools (lefthook, rustfmt, clippy)
-cargo run --bin setup
-```
+# Build
+cargo build --release
 
-### Pre-commit Hooks
+# Lint
+cargo clippy
 
-Lefthook runs automatically on commit:
-- ShellCheck linting
-- Bash syntax validation
-- Plist template validation
-- Secrets detection
-- Markdown linting
-
-Run manually:
-```bash
+# Run pre-commit checks
 lefthook run pre-commit
 ```
 
-## Documentation
-
-- 📖 [Configuration Guide](docs/CONFIGURATION.md) - Detailed configuration options
-- 🤝 [Contributing Guidelines](docs/CONTRIBUTING.md) - How to contribute
-- 📋 [System Documentation](docs/BREW-UPDATE-SYSTEM.md) - Technical details
-- 📄 [License](docs/LICENSE) - MIT License
-
-## Contributing
-
-Contributions welcome! Please see [Contributing Guidelines](docs/CONTRIBUTING.md) for details.
+---
 
 ## License
 
-MIT License - see [LICENSE](docs/LICENSE) for details
+MIT
 
-## Author
-
-Created for automated Homebrew maintenance on macOS systems.
+---
 
 ## Changelog
 
-### v1.0.0
-- Initial release
-- Network connectivity check
-- Disk space validation
-- Differential logging
-- Automatic log rotation
-- 3x daily scheduling
-- Desktop notifications
+### v0.3.0 — Unified CLI
+- Merged `brew-installer` (bash) and `brew-auto-update` (Rust daemon) into a single binary
+- New `provision` subcommand replaces the bash installer script
+- `packages.toml` manifest for all package definitions
+- All commands unified under `mac-setup <subcommand>` with clap
 
-### v1.1.0
-- Added global NPM package auto-updates
+### v0.2.0
+- Rewrite in Rust, native binary
+- Comprehensive cleanup engine
+- NPM integration
 
-### v2.0.0
-- Rewrite in Rust for safety and performance
-- Native binary instead of Bash script
+### v0.1.0
+- Initial release as `brew-auto-update`
