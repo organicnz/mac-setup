@@ -181,34 +181,25 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
 }
 
 fn cleanup_npm(config: &Config, stats: &mut CleanupStats, home: &str) {
-    utils::log("  📦 Cleaning NPM...", config);
+    utils::log("  🐰 Cleaning bun cache...", config);
 
-    if !command_exists("npm") {
-        return;
+    if command_exists("bun") {
+        let _ = Command::new("bun").args(["pm", "cache", "rm"]).output();
     }
 
-    let _ = Command::new("npm")
-        .args(["cache", "clean", "--force"])
-        .output();
+    // Clean bun global cache directory
+    let bun_cache = format!("{}/.bun/install/cache", home);
+    let freed = clean_old_files(&bun_cache, 14, stats);
+    stats.npm_cache_freed += freed;
 
+    // Also clean any residual .npm directories if they exist
     let npm_caches = [
         format!("{}/.npm/_cacache", home),
         format!("{}/.npm/_logs", home),
-        format!("{}/.npm/_npx", home),
     ];
-
     for cache in &npm_caches {
         let freed = clean_old_files(cache, 7, stats);
         stats.npm_cache_freed += freed;
-    }
-
-    let temp_node_modules = format!("{}/tmp/node_modules", home);
-    if Path::new(&temp_node_modules).exists() {
-        let freed = get_dir_size(&temp_node_modules);
-        if std::fs::remove_dir_all(&temp_node_modules).is_ok() {
-            stats.npm_cache_freed += freed;
-            stats.dirs_removed += 1;
-        }
     }
 }
 
@@ -494,14 +485,7 @@ fn cleanup_dev_caches(config: &Config, stats: &mut CleanupStats, home: &str) {
         stats.system_cache_freed += freed;
     }
 
-    if command_exists("yarn") {
-        let _ = Command::new("yarn").args(["cache", "clean"]).output();
-    }
-
-    if command_exists("pnpm") {
-        let _ = Command::new("pnpm").args(["store", "prune"]).output();
-    }
-
+    // bun global cache — already cleaned in cleanup_npm/cleanup_bun above
     let bun_cache = format!("{}/.bun/install/cache", home);
     let freed = clean_old_files(&bun_cache, 14, stats);
     stats.system_cache_freed += freed;
@@ -744,7 +728,7 @@ fn cleanup_temp_files(config: &Config, stats: &mut CleanupStats) {
 fn cleanup_stale_locks(config: &Config, stats: &mut CleanupStats) {
     utils::log("  🔒 Cleaning stale locks...", config);
 
-    let lock_patterns = [("/tmp", "stout"), ("/tmp", "brew-"), ("/tmp", ".npm-")];
+    let lock_patterns = [("/tmp", "stout"), ("/tmp", "brew-"), ("/tmp", ".bun-")];
 
     for (dir, pattern) in &lock_patterns {
         if let Ok(entries) = std::fs::read_dir(dir) {

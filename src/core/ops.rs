@@ -684,11 +684,9 @@ pub fn pre_housekeeping(config: &Config) -> HousekeepingStats {
         }
     }
 
-    // 4. Clean NPM cache
-    utils::log("  Cleaning NPM cache...", config);
-    let _ = Command::new("npm")
-        .args(["cache", "clean", "--force"])
-        .output();
+    // 4. Clean bun cache
+    utils::log("  Cleaning bun cache...", config);
+    let _ = Command::new("bun").args(["pm", "cache", "rm"]).output();
 
     // Log summary
     if stats.cache_cleared_bytes > 0 || stats.deps_removed > 0 {

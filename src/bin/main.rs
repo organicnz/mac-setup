@@ -34,10 +34,10 @@ enum Commands {
     /// One-time provisioning: install Xcode CLT, stout, mise, and all packages from packages.toml
     Provision,
 
-    /// Run the automated update daemon (stout update + upgrade + npm + cleanup)
+    /// Run the automated update daemon (stout update + upgrade + bun + cleanup)
     Update,
 
-    /// Remove broken casks, fix npm issues, and run housekeeping
+    /// Remove broken casks, fix bun issues, and run housekeeping
     Fix,
 
     /// Run pre-commit audit checks (plist, secrets, markdown)
@@ -400,23 +400,23 @@ fn run_fix(config: &Config) {
         }
     }
 
-    log("\n[3/4] Fixing Invalid NPM Package...", config);
+    log("\n[3/4] Fixing invalid bun global package...", config);
     print!("  - Removing invalid package... ");
     io::stdout().flush().unwrap();
-    let npm_status = Command::new("npm")
-        .args(["uninstall", "-g", "@anthropic-ai/.claude-code-2DTsDk1V"])
+    let bun_status = Command::new("bun")
+        .args(["remove", "--global", "@anthropic-ai/.claude-code-2DTsDk1V"])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status();
-    match npm_status {
+    match bun_status {
         Ok(s) if s.success() => println!("✓"),
         _ => println!("✗ (Failed or not present)"),
     }
 
-    print!("  - Cleaning npm cache... ");
+    print!("  - Cleaning bun cache... ");
     io::stdout().flush().unwrap();
-    let cache_status = Command::new("npm")
-        .args(["cache", "clean", "--force"])
+    let cache_status = Command::new("bun")
+        .args(["pm", "cache", "rm"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
