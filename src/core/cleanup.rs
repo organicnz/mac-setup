@@ -22,7 +22,7 @@ pub struct CleanupStats {
     pub files_removed: usize,
     pub dirs_removed: usize,
     pub stout_cache_freed: u64,
-    pub npm_cache_freed: u64,
+    pub bun_cache_freed: u64,
     pub cargo_cache_freed: u64,
     pub system_cache_freed: u64,
     pub logs_cleaned: usize,
@@ -44,8 +44,8 @@ impl std::fmt::Display for CleanupStats {
         if self.stout_cache_freed > 0 {
             writeln!(f, "   stout: {}MB", self.stout_cache_freed / 1_000_000)?;
         }
-        if self.npm_cache_freed > 0 {
-            writeln!(f, "   NPM: {}MB", self.npm_cache_freed / 1_000_000)?;
+        if self.bun_cache_freed > 0 {
+            writeln!(f, "   Bun: {}MB", self.bun_cache_freed / 1_000_000)?;
         }
         if self.cargo_cache_freed > 0 {
             writeln!(f, "   Cargo: {}MB", self.cargo_cache_freed / 1_000_000)?;
@@ -89,7 +89,7 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
     cleanup_stale_locks(config, &mut stats);
 
     stats.bytes_freed = stats.stout_cache_freed
-        + stats.npm_cache_freed
+        + stats.bun_cache_freed
         + stats.cargo_cache_freed
         + stats.system_cache_freed;
 
@@ -190,16 +190,16 @@ fn cleanup_npm(config: &Config, stats: &mut CleanupStats, home: &str) {
     // Clean bun global cache directory
     let bun_cache = format!("{}/.bun/install/cache", home);
     let freed = clean_old_files(&bun_cache, 14, stats);
-    stats.npm_cache_freed += freed;
+    stats.bun_cache_freed += freed;
 
-    // Also clean any residual .npm directories if they exist
+    // Clean residual .npm directories if they exist (migration artifacts)
     let npm_caches = [
         format!("{}/.npm/_cacache", home),
         format!("{}/.npm/_logs", home),
     ];
     for cache in &npm_caches {
         let freed = clean_old_files(cache, 7, stats);
-        stats.npm_cache_freed += freed;
+        stats.bun_cache_freed += freed;
     }
 }
 

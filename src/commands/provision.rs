@@ -4,7 +4,7 @@
 //!   stout  — taps, formulae, casks  (Rust-based Homebrew-compatible client)
 //!   mise   — language runtimes (node, python, go, deno, ruby, …)
 //!   pip    — Python packages (after mise installs python)
-//!   npm    — global JS tools (after mise installs node)
+//!   bun    — global JS packages
 //!   go     — Go binaries (after mise installs go)
 //!
 //! Brew is NOT used here. If a package is missing from stout's index, it is

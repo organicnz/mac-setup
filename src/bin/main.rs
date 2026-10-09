@@ -250,9 +250,9 @@ fn run_update(config: &Config) {
         post_cleanup_stats.stout_cache_freed
     );
     log_freed!(
-        "NPM",
-        pre_cleanup_stats.npm_cache_freed,
-        post_cleanup_stats.npm_cache_freed
+        "Bun",
+        pre_cleanup_stats.bun_cache_freed,
+        post_cleanup_stats.bun_cache_freed
     );
     log_freed!(
         "Cargo",
