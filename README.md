@@ -219,6 +219,7 @@ lefthook run pre-commit
 | Document | What it covers |
 |----------|----------------|
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, the safety invariants, the coding and commit conventions |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | The expectations for everyone taking part in this project |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The update daemon, the `stout` contract layer, the cleanup engine |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every environment variable and what reads it, plus the `packages.toml` manifest |
 | [CLAUDE.md](CLAUDE.md) | Project context for AI assistants |

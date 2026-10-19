@@ -20,6 +20,7 @@ parts of the codebase are load-bearing.
 - [Testing](#testing)
 - [Commit and branch conventions](#commit-and-branch-conventions)
 - [Opening issues](#opening-issues)
+- [Community expectations](#community-expectations)
 - [License](#license)
 
 ---
@@ -222,6 +223,21 @@ lefthook run pre-push
 
 If an issue is unclear, leave a comment asking for the missing detail. That is a
 contribution too.
+
+---
+
+## Community expectations
+
+Everyone taking part in this project — in issues, in pull requests, and in discussions —
+is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report anything that
+breaks it to the maintainer; reports are handled confidentially.
+
+Two practical expectations, in the spirit of it:
+
+- Assume the other person is competent and is trying to help. "This does not work"
+  beats "this is wrong".
+- Review the work, not the person. A pull request that takes a different approach from
+  yours is not a rejection of yours.
 
 ---
 
