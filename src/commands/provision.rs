@@ -7,10 +7,10 @@
 //!   bun    — global JS packages
 //!   go     — Go binaries (after mise installs go)
 //!
-//! Brew is NOT used here. If a package is missing from stout's index, it is
-//! logged as a warning and skipped — not silently routed through brew.
+//! If a package is missing from stout's index, it is logged as a warning and
+//! skipped — nothing is routed through a fallback package manager.
 
-use crate::core::utils::{log, log_error, Config};
+use crate::core::utils::{command_available, home_path, log, log_error, Config};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -44,11 +44,6 @@ pub struct PackageList {
 #[derive(Debug, Deserialize, Default)]
 pub struct MiseConfig {
     pub tools: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct NpmConfig {
-    pub global: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -196,10 +191,7 @@ pub fn run(config: &Config) -> bool {
 fn locate_manifest() -> String {
     let candidates = [
         "packages.toml".to_string(),
-        format!(
-            "{}/packages.toml",
-            std::env::var("HOME").unwrap_or_default()
-        ),
+        home_path("packages.toml").to_string_lossy().into_owned(),
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("packages.toml")))
@@ -216,42 +208,30 @@ fn locate_manifest() -> String {
 
 fn load_manifest(path: &str) -> Option<Manifest> {
     let content = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&content).ok()
-}
+    let manifest: Manifest = toml::from_str(&content).ok()?;
 
-fn command_available(cmd: &str) -> bool {
-    if Command::new("which")
-        .arg(cmd)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // Warn when every section is absent — most likely a typo in a section name
+    // (e.g. `[formulea]` instead of `[formulae]`).
+    if manifest.taps.is_none()
+        && manifest.formulae.is_none()
+        && manifest.casks.is_none()
+        && manifest.mise.is_none()
+        && manifest.pip.is_none()
+        && manifest.pipx.is_none()
+        && manifest.bun.is_none()
+        && manifest.go.is_none()
     {
-        return true;
+        eprintln!(
+            "⚠ packages.toml appears empty or contains no recognized sections — check for typos in section names"
+        );
     }
-    // Also check ~/.local/bin (stout and mise install here)
-    let home = std::env::var("HOME").unwrap_or_default();
-    Path::new(&format!("{}/.local/bin/{}", home, cmd)).exists()
+
+    Some(manifest)
 }
 
-pub fn stout_bin() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = format!("{}/.local/bin/stout", home);
-    if Path::new(&local).exists() {
-        return local;
-    }
-    "stout".to_string()
-}
-
-pub fn mise_bin() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = format!("{}/.local/bin/mise", home);
-    if Path::new(&local).exists() {
-        return local;
-    }
-    "mise".to_string()
-}
+// Re-exported from utils so every module resolves these binaries the same way.
+// These used to be duplicated byte-for-byte in four places.
+pub use crate::core::utils::{mise_bin, stout_cmd as stout_bin};
 
 fn stout_formula_installed(name: &str) -> bool {
     let short = name.split('/').next_back().unwrap_or(name);
@@ -261,6 +241,8 @@ fn stout_formula_installed(name: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
+        // stout not found: treat as not installed so the install is attempted.
+        // Install is idempotent, so a false negative here just adds a retry.
         .unwrap_or(false)
 }
 
@@ -272,6 +254,8 @@ fn stout_cask_installed(name: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
+        // stout not found: treat as not installed so the install is attempted.
+        // Install is idempotent, so a false negative here just adds a retry.
         .unwrap_or(false)
 }
 
@@ -417,13 +401,19 @@ fn install_taps(taps: &[String], config: &Config, stats: &mut ProvisionStats) {
     }
     log(&format!("\n🔌 Adding {} taps...", taps.len()), config);
 
-    for tap in taps {
+    for (i, tap) in taps.iter().enumerate() {
         if stout_tap_installed(tap) {
-            log(&format!("  ✓ already tapped: {}", tap), config);
+            log(
+                &format!("  [{}/{}] ✓ already tapped: {}", i + 1, taps.len(), tap),
+                config,
+            );
             stats.skipped += 1;
             continue;
         }
-        log(&format!("  Adding tap {}...", tap), config);
+        log(
+            &format!("  [{}/{}] Adding tap {}...", i + 1, taps.len(), tap),
+            config,
+        );
         let ok = Command::new(stout_bin())
             .args(["tap", tap])
             .stdout(Stdio::null())
@@ -458,13 +448,24 @@ fn install_formulae(packages: &[String], config: &Config, stats: &mut ProvisionS
         config,
     );
 
-    for pkg in packages {
+    for (i, pkg) in packages.iter().enumerate() {
         if stout_formula_installed(pkg) {
-            log(&format!("  ✓ already installed: {}", pkg), config);
+            log(
+                &format!(
+                    "  [{}/{}] ✓ already installed: {}",
+                    i + 1,
+                    packages.len(),
+                    pkg
+                ),
+                config,
+            );
             stats.skipped += 1;
             continue;
         }
-        log(&format!("  Installing {}...", pkg), config);
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, packages.len(), pkg),
+            config,
+        );
         let ok = Command::new(stout_bin())
             .args(["install", pkg.as_str()])
             .stdout(Stdio::null())
@@ -496,13 +497,29 @@ fn install_casks(packages: &[String], config: &Config, stats: &mut ProvisionStat
         config,
     );
 
-    for pkg in packages {
+    for (i, pkg) in packages.iter().enumerate() {
         if stout_cask_installed(pkg) {
-            log(&format!("  ✓ already installed: {}", pkg), config);
+            log(
+                &format!(
+                    "  [{}/{}] ✓ already installed: {}",
+                    i + 1,
+                    packages.len(),
+                    pkg
+                ),
+                config,
+            );
             stats.skipped += 1;
             continue;
         }
-        log(&format!("  Installing cask {}...", pkg), config);
+        log(
+            &format!(
+                "  [{}/{}] Installing cask {}...",
+                i + 1,
+                packages.len(),
+                pkg
+            ),
+            config,
+        );
         let ok = Command::new(stout_bin())
             .args(["install", "--cask", pkg.as_str()])
             .stdout(Stdio::null())
@@ -537,8 +554,11 @@ fn install_mise_tools(tools: &[String], config: &Config, stats: &mut ProvisionSt
         config,
     );
 
-    for tool in tools {
-        log(&format!("  Installing {}...", tool), config);
+    for (i, tool) in tools.iter().enumerate() {
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, tools.len(), tool),
+            config,
+        );
         let ok = Command::new(mise_bin())
             .args(["use", "--global", tool.as_str()])
             .stdout(Stdio::null())
@@ -582,8 +602,11 @@ fn install_pip_packages(packages: &[String], config: &Config, stats: &mut Provis
         .stderr(Stdio::null())
         .status();
 
-    for pkg in packages {
-        log(&format!("  Installing {}...", pkg), config);
+    for (i, pkg) in packages.iter().enumerate() {
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, packages.len(), pkg),
+            config,
+        );
         let ok = Command::new(python)
             .args(["-m", "pip", "install", pkg.as_str()])
             .stdout(Stdio::null())
@@ -614,11 +637,33 @@ fn install_bun_globals(packages: &[String], config: &Config, stats: &mut Provisi
     if packages.is_empty() {
         return;
     }
-    if !command_available("bun") {
+
+    // Find bun — check ~/.bun/bin first, thenmise shim, then PATH
+    let bun_candidates = [
+        home_path(".bun/bin/bun"),
+        home_path(".local/share/mise/shims/bun"),
+    ];
+    let bun_bin = bun_candidates
+        .iter()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bun".to_string());
+
+    let bun_exists = Command::new(&bun_bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !bun_exists {
         log(
             "  ⚠ bun not found — ensure bun is installed via mise first",
             config,
         );
+        // Count the packages we couldn't attempt as skipped.
+        stats.skipped += packages.len();
         return;
     }
     log(
@@ -626,9 +671,12 @@ fn install_bun_globals(packages: &[String], config: &Config, stats: &mut Provisi
         config,
     );
 
-    for pkg in packages {
-        log(&format!("  Installing {}...", pkg), config);
-        let ok = Command::new("bun")
+    for (i, pkg) in packages.iter().enumerate() {
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, packages.len(), pkg),
+            config,
+        );
+        let ok = Command::new(&bun_bin)
             .args(["install", "--global", pkg.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -681,7 +729,7 @@ fn install_pipx_packages(packages: &[String], config: &Config, stats: &mut Provi
         config,
     );
 
-    for pkg in packages {
+    for (i, pkg) in packages.iter().enumerate() {
         // Check if already installed
         let installed = Command::new(&python)
             .args(["-m", "pipx", "list", "--short"])
@@ -690,12 +738,23 @@ fn install_pipx_packages(packages: &[String], config: &Config, stats: &mut Provi
             .unwrap_or(false);
 
         if installed {
-            log(&format!("  ✓ already installed: {}", pkg), config);
+            log(
+                &format!(
+                    "  [{}/{}] ✓ already installed: {}",
+                    i + 1,
+                    packages.len(),
+                    pkg
+                ),
+                config,
+            );
             stats.skipped += 1;
             continue;
         }
 
-        log(&format!("  Installing {}...", pkg), config);
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, packages.len(), pkg),
+            config,
+        );
         let ok = Command::new(&python)
             .args(["-m", "pipx", "install", pkg.as_str()])
             .stdout(Stdio::null())
@@ -715,19 +774,18 @@ fn install_pipx_packages(packages: &[String], config: &Config, stats: &mut Provi
 }
 
 fn find_mise_python() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
     // Try mise shim first
-    let shim = format!("{}/.local/share/mise/shims/python3", home);
-    if Path::new(&shim).exists() {
-        return shim;
+    let shim = home_path(".local/share/mise/shims/python3");
+    if shim.exists() {
+        return shim.to_string_lossy().into_owned();
     }
     // Fall back to mise installs
-    let installs = format!("{}/.local/share/mise/installs/python", home);
+    let installs = home_path(".local/share/mise/installs/python");
     if let Ok(mut entries) = std::fs::read_dir(&installs) {
         if let Some(Ok(e)) = entries.next() {
-            let candidate = format!("{}/bin/python3", e.path().display());
-            if Path::new(&candidate).exists() {
-                return candidate;
+            let candidate = e.path().join("bin/python3");
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
             }
         }
     }
@@ -747,6 +805,8 @@ fn install_go_tools(packages: &[String], config: &Config, stats: &mut ProvisionS
             "  ⚠ go not found — ensure go is installed via mise first",
             config,
         );
+        // Count the packages we couldn't attempt as skipped.
+        stats.skipped += packages.len();
         return;
     }
     log(
@@ -754,8 +814,11 @@ fn install_go_tools(packages: &[String], config: &Config, stats: &mut ProvisionS
         config,
     );
 
-    for pkg in packages {
-        log(&format!("  Installing {}...", pkg), config);
+    for (i, pkg) in packages.iter().enumerate() {
+        log(
+            &format!("  [{}/{}] Installing {}...", i + 1, packages.len(), pkg),
+            config,
+        );
         let ok = Command::new("go")
             .args(["install", "-v", pkg.as_str()])
             .stdout(Stdio::null())
@@ -781,13 +844,13 @@ mod tests {
     fn sample_manifest_toml() -> &'static str {
         r#"
 [taps]
-taps = ["homebrew/core", "hashicorp/tap"]
+taps = ["anomalyco/tap", "hashicorp/tap"]
 
 [formulae]
 packages = ["git", "wget", "hashicorp/tap/terraform"]
 
 [casks]
-packages = ["docker", "slack"]
+packages = ["podman", "slack"]
 
 [mise]
 tools = ["node@lts", "python@3.12", "bun@latest", "aqua:hashicorp/terraform@latest"]

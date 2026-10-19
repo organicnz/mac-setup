@@ -1,19 +1,18 @@
 //! Comprehensive cleanup module for development environments
-//! Handles stout (formulae/casks), NPM, Cargo, and system caches
+//! Handles stout (formulae/casks), bun, Cargo, and system caches
 
-use super::utils::{self, Config};
+use super::utils::{self, command_available, stout_cmd, Config};
+use crate::core::stout;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-fn stout_cmd() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = format!("{}/.local/bin/stout", home);
-    if Path::new(&local).exists() {
-        return local;
-    }
-    "stout".to_string()
-}
+/// Controls whether cleanup passes actually delete anything.
+/// Set once at startup from the CLI `--dry-run` flag; read by the
+/// low-level `clean_old_*` and `clean_dir_contents` helpers so they
+/// can skip removals without changing every function signature.
+pub static DRY_RUN: OnceLock<bool> = OnceLock::new();
 
 /// Comprehensive cleanup statistics
 #[derive(Debug, Default)]
@@ -75,7 +74,7 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
     utils::log("🧹 Running comprehensive cleanup...", config);
 
     cleanup_stout(config, &mut stats, aggressive);
-    cleanup_npm(config, &mut stats, &home);
+    cleanup_bun(config, &mut stats, &home);
     cleanup_cargo(config, &mut stats, &home);
     cleanup_system_caches(config, &mut stats, &home, aggressive);
     cleanup_dev_caches(config, &mut stats, &home);
@@ -105,17 +104,84 @@ pub fn comprehensive_cleanup(config: &Config, aggressive: bool) -> CleanupStats 
     stats
 }
 
-fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
+/// Clean only what the upgrade step itself created.
+///
+/// `comprehensive_cleanup` used to run twice per update with identical arguments,
+/// which meant every stage — package-manager prunes, Time Machine snapshot
+/// deletions, cache sweeps — ran twice 3x/day for no gain. The pre-flight sweep in
+/// `run_update` already covers everything below; here we only drop caches the
+/// upgrades refilled.
+pub fn cleanup_after_upgrades(config: &Config) -> CleanupStats {
+    let mut stats = CleanupStats::default();
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    if home.is_empty() {
+        stats
+            .errors
+            .push("HOME environment variable not set".to_string());
+        return stats;
+    }
+
+    utils::log("🧹 Cleaning upgrade residue...", config);
+
+    cleanup_stout(config, &mut stats, false);
+    cleanup_bun(config, &mut stats, &home);
+
+    stats.bytes_freed = stats.stout_cache_freed
+        + stats.bun_cache_freed
+        + stats.cargo_cache_freed
+        + stats.system_cache_freed;
+
+    utils::log(
+        &format!(
+            "✓ Cleanup complete: {}MB freed, {} files removed",
+            stats.total_mb_freed(),
+            stats.files_removed
+        ),
+        config,
+    );
+
+    stats
+}
+
+/// The `--prune` day count for `stout cleanup`.
+///
+/// aggressive → 0 ("all"); otherwise the `MAC_SETUP_PRUNE_DAYS` knob,
+/// defaulting to 7. A separate function so the invalid-`all`-string
+/// regression is unit-testable without shelling out.
+fn prune_days_for(aggressive: bool, env_days: Option<&str>) -> u64 {
+    if aggressive {
+        return 0;
+    }
+    env_days.and_then(|v| v.trim().parse().ok()).unwrap_or(7)
+}
+
+fn cleanup_stout(config: &Config, stats: &mut CleanupStats, aggressive: bool) {
     utils::log("  🦀 Cleaning stout...", config);
 
-    // Always use --prune=all to remove all cached downloads (they can be re-downloaded)
-    if let Ok(output) = Command::new(stout_cmd())
-        .args(["cleanup", "--prune=all", "-s"])
-        .output()
-    {
+    let dry = *DRY_RUN.get_or_init(|| false);
+
+    // `stout cleanup` is the authoritative old-package cleaner: it prunes
+    // downloads older than the prune window, and `--scrub` also drops
+    // downloads for packages that are no longer installed. `--prune` takes a
+    // day count where 0 means "all" — not the string "all", which stout
+    // rejects, so aggressive mode used to prune nothing at all. Its own
+    // summary is the single source of truth for bytes freed, so the
+    // hand-rolled downloads/Cask deletion that used to follow here (and
+    // double-counted the same bytes) is gone.
+    let prune_days = prune_days_for(
+        aggressive,
+        std::env::var("MAC_SETUP_PRUNE_DAYS").ok().as_deref(),
+    );
+    let prune = format!("--prune={prune_days}");
+    let mut cleanup_args: Vec<&str> = vec!["cleanup", &prune, "-s"];
+    if dry {
+        cleanup_args.push("-n");
+    }
+    if let Ok(output) = Command::new(stout_cmd()).args(&cleanup_args).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(bytes) = parse_size_from_output(&stdout) {
+            if let Some((bytes, _)) = stout::parse_freed(&stdout) {
                 stats.stout_cache_freed += bytes;
             }
         }
@@ -124,102 +190,60 @@ fn cleanup_stout(config: &Config, stats: &mut CleanupStats, _aggressive: bool) {
     if let Ok(output) = Command::new(stout_cmd()).arg("autoremove").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stats.files_removed += stdout
-                .lines()
-                .filter(|l| l.starts_with("==> Uninstalling"))
-                .count();
+            // stout does not use Homebrew's "==> Uninstalling" prefix,
+            // which made the old count always zero.
+            stats.files_removed += stout::count_removed_items(&stdout);
         }
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
-
-    // Clean downloads directory completely - these are just cached .dmg/.pkg files
-    let downloads_dir = format!("{}/Library/Caches/stout/downloads", home);
-    if Path::new(&downloads_dir).exists() {
-        let freed = get_dir_size(&downloads_dir);
-        if let Ok(entries) = std::fs::read_dir(&downloads_dir) {
-            for entry in entries.flatten() {
-                let removed = if entry.path().is_file() {
-                    std::fs::remove_file(entry.path()).is_ok()
-                } else if entry.path().is_dir() {
-                    std::fs::remove_dir_all(entry.path()).is_ok()
-                } else {
-                    false
-                };
-                if removed {
-                    stats.files_removed += 1;
-                }
-            }
-        }
-        stats.stout_cache_freed += freed;
-    }
-
-    // Clean Cask cache completely as well
-    let cask_dir = format!("{}/Library/Caches/stout/Cask", home);
-    if Path::new(&cask_dir).exists() {
-        let freed = get_dir_size(&cask_dir);
-        if let Ok(entries) = std::fs::read_dir(&cask_dir) {
-            for entry in entries.flatten() {
-                let removed = if entry.path().is_file() {
-                    std::fs::remove_file(entry.path()).is_ok()
-                } else if entry.path().is_dir() {
-                    std::fs::remove_dir_all(entry.path()).is_ok()
-                } else {
-                    false
-                };
-                if removed {
-                    stats.files_removed += 1;
-                }
-            }
-        }
-        stats.stout_cache_freed += freed;
-    }
-
     let log_dir = format!("{}/Library/Logs/stout", home);
-    let freed = clean_old_files(&log_dir, 7, stats);
+    let freed = clean_old_files(Path::new(&log_dir), 7, stats);
     stats.stout_cache_freed += freed;
 }
 
-fn cleanup_npm(config: &Config, stats: &mut CleanupStats, home: &str) {
+fn cleanup_bun(config: &Config, stats: &mut CleanupStats, home: &str) {
     utils::log("  🐰 Cleaning bun cache...", config);
 
-    if command_exists("bun") {
+    if command_available("bun") {
         let _ = Command::new("bun").args(["pm", "cache", "rm"]).output();
     }
 
     // Clean bun global cache directory
     let bun_cache = format!("{}/.bun/install/cache", home);
-    let freed = clean_old_files(&bun_cache, 14, stats);
+    let freed = clean_old_files(Path::new(&bun_cache), 14, stats);
     stats.bun_cache_freed += freed;
 
-    // Clean residual .npm directories if they exist (migration artifacts)
+    // Residual npm directories from the pre-bun migration. Freed bytes are credited
+    // to `system_cache_freed`, not `bun_cache_freed` — reporting them as "Bun" would
+    // misattribute npm's cache to bun if anyone ever runs npm again.
     let npm_caches = [
         format!("{}/.npm/_cacache", home),
         format!("{}/.npm/_logs", home),
     ];
     for cache in &npm_caches {
-        let freed = clean_old_files(cache, 7, stats);
-        stats.bun_cache_freed += freed;
+        let freed = clean_old_files(Path::new(cache), 7, stats);
+        stats.system_cache_freed += freed;
     }
 }
 
 fn cleanup_cargo(config: &Config, stats: &mut CleanupStats, home: &str) {
     utils::log("  🦀 Cleaning Cargo...", config);
 
-    if !command_exists("cargo") {
+    if !command_available("cargo") {
         return;
     }
 
     let registry_cache = format!("{}/.cargo/registry/cache", home);
-    let freed = clean_old_files(&registry_cache, 30, stats);
+    let freed = clean_old_files(Path::new(&registry_cache), 30, stats);
     stats.cargo_cache_freed += freed;
 
     let registry_src = format!("{}/.cargo/registry/src", home);
-    let freed = clean_old_files(&registry_src, 30, stats);
+    let freed = clean_old_files(Path::new(&registry_src), 30, stats);
     stats.cargo_cache_freed += freed;
 
     let git_checkouts = format!("{}/.cargo/git/checkouts", home);
-    let freed = clean_old_files(&git_checkouts, 30, stats);
+    let freed = clean_old_files(Path::new(&git_checkouts), 30, stats);
     stats.cargo_cache_freed += freed;
 }
 
@@ -229,19 +253,24 @@ fn cleanup_system_caches(config: &Config, stats: &mut CleanupStats, home: &str, 
     let max_age = if aggressive { 1 } else { 7 };
 
     // Standard app caches
+    // `org.swift.swiftpm` is intentionally absent: it is swept at a 30-day threshold by
+    // `cleanup_xcode_packages`. Including it here meant the 7-day pass emptied it
+    // first, making that dedicated 30-day pass a guaranteed no-op.
+    //
+    // `~/.cache` is also intentionally absent. It is a shared convention directory
+    // used by mise, bun, uv and pip — the very toolchains this daemon manages — so a
+    // blanket age-based sweep can prune state another tool still considers live.
     let cache_dirs = [
         format!("{}/Library/Caches/com.apple.dt.Xcode", home),
-        format!("{}/Library/Caches/org.swift.swiftpm", home),
         format!("{}/Library/Caches/com.googlecode.iterm2", home),
         format!("{}/Library/Caches/com.spotify.client", home),
         format!("{}/Library/Caches/com.microsoft.VSCode", home),
         format!("{}/Library/Caches/Google", home),
-        format!("{}/.cache", home),
     ];
 
     for cache_dir in &cache_dirs {
         if Path::new(cache_dir).exists() {
-            let freed = clean_old_files(cache_dir, max_age, stats);
+            let freed = clean_old_files(Path::new(cache_dir), max_age, stats);
             stats.system_cache_freed += freed;
         }
     }
@@ -266,26 +295,31 @@ fn cleanup_system_caches(config: &Config, stats: &mut CleanupStats, home: &str, 
     // Xcode DerivedData - clean completely in aggressive mode, or old projects otherwise
     let derived_data = format!("{}/Library/Developer/Xcode/DerivedData", home);
     if Path::new(&derived_data).exists() {
-        if aggressive {
+        // DerivedData is mutated by an in-flight Xcode build;
+        // wiping it mid-build corrupts that build. Skip while
+        // Xcode runs, matching the browser/mail liveness guards.
+        if app_is_running("Xcode") {
+            utils::log("  ℹ Skipping DerivedData — Xcode is running", config);
+        } else if aggressive {
             // In aggressive mode, clear all DerivedData
             let freed = clean_dir_contents(&derived_data, stats);
             stats.system_cache_freed += freed;
         } else {
-            let freed = clean_old_files(&derived_data, 7, stats);
+            let freed = clean_old_files(Path::new(&derived_data), 7, stats);
             stats.system_cache_freed += freed;
         }
     }
 
     let device_support = format!("{}/Library/Developer/Xcode/iOS DeviceSupport", home);
     if Path::new(&device_support).exists() {
-        let freed = clean_old_dirs(&device_support, 30, stats);
+        let freed = clean_old_dirs(Path::new(&device_support), 30, stats);
         stats.system_cache_freed += freed;
     }
 
     // Xcode Archives older than 30 days
     let archives = format!("{}/Library/Developer/Xcode/Archives", home);
     if Path::new(&archives).exists() {
-        let freed = clean_old_dirs(&archives, 30, stats);
+        let freed = clean_old_dirs(Path::new(&archives), 30, stats);
         stats.system_cache_freed += freed;
     }
 
@@ -299,6 +333,7 @@ fn cleanup_system_caches(config: &Config, stats: &mut CleanupStats, home: &str, 
 /// Clean all contents of a directory without removing the directory itself
 fn clean_dir_contents(dir: &str, stats: &mut CleanupStats) -> u64 {
     let mut freed: u64 = 0;
+    let dry = *DRY_RUN.get_or_init(|| false);
 
     if !Path::new(dir).exists() {
         return 0;
@@ -309,15 +344,19 @@ fn clean_dir_contents(dir: &str, stats: &mut CleanupStats) -> u64 {
             let size = if entry.path().is_file() {
                 entry.metadata().map(|m| m.len()).unwrap_or(0)
             } else if entry.path().is_dir() {
-                get_dir_size(&entry.path().to_string_lossy())
+                get_dir_size(&entry.path())
             } else {
                 0
             };
 
-            let removed = if entry.path().is_file() {
-                std::fs::remove_file(entry.path()).is_ok()
-            } else if entry.path().is_dir() {
-                std::fs::remove_dir_all(entry.path()).is_ok()
+            let removed = if !dry {
+                if entry.path().is_file() {
+                    std::fs::remove_file(entry.path()).is_ok()
+                } else if entry.path().is_dir() {
+                    std::fs::remove_dir_all(entry.path()).is_ok()
+                } else {
+                    false
+                }
             } else {
                 false
             };
@@ -334,7 +373,7 @@ fn clean_dir_contents(dir: &str, stats: &mut CleanupStats) -> u64 {
 
 /// Clean unavailable iOS Simulators
 fn cleanup_ios_simulators(config: &Config, stats: &mut CleanupStats) {
-    if !command_exists("xcrun") {
+    if !command_available("xcrun") {
         return;
     }
 
@@ -353,8 +392,17 @@ fn cleanup_ios_simulators(config: &Config, stats: &mut CleanupStats) {
     let home = std::env::var("HOME").unwrap_or_default();
     let sim_caches = format!("{}/Library/Developer/CoreSimulator/Caches", home);
     if Path::new(&sim_caches).exists() {
-        let freed = clean_dir_contents(&sim_caches, stats);
-        stats.system_cache_freed += freed;
+        // CoreSimulator state is live while Xcode or the
+        // Simulator app run; wiping it mid-session breaks both.
+        if app_is_running("Xcode") || app_is_running("Simulator") {
+            utils::log(
+                "    ℹ Skipping CoreSimulator caches — Simulator/Xcode is running",
+                config,
+            );
+        } else {
+            let freed = clean_dir_contents(&sim_caches, stats);
+            stats.system_cache_freed += freed;
+        }
     }
 }
 
@@ -388,7 +436,7 @@ fn cleanup_android_sdk(config: &Config, stats: &mut CleanupStats, home: &str, ag
     let gradle_caches = format!("{}/.gradle/caches/build-cache-1", home);
     if Path::new(&gradle_caches).exists() {
         let max_age = if aggressive { 7 } else { 30 };
-        let freed = clean_old_files(&gradle_caches, max_age, stats);
+        let freed = clean_old_files(Path::new(&gradle_caches), max_age, stats);
         stats.system_cache_freed += freed;
     }
 
@@ -419,25 +467,38 @@ fn cleanup_dev_caches(config: &Config, stats: &mut CleanupStats, home: &str) {
     ];
 
     for cache in &vscode_caches {
-        let freed = clean_old_files(cache, 14, stats);
+        let freed = clean_old_files(Path::new(cache), 14, stats);
         stats.system_cache_freed += freed;
     }
 
-    // Gradle caches
+    // Gradle manages its own dependency cache and re-resolves correctly when it is
+    // missing; deleting `~/.gradle/caches` wholesale only forced a full
+    // re-download. Age-filtered instead of a blanket wipe.
     let gradle_cache = format!("{}/.gradle/caches", home);
-    let freed = clean_old_files(&gradle_cache, 30, stats);
+    let freed = clean_old_files(Path::new(&gradle_cache), 90, stats);
     stats.system_cache_freed += freed;
 
     // CocoaPods cache
     let cocoapods_cache = format!("{}/Library/Caches/CocoaPods", home);
-    let freed = clean_old_files(&cocoapods_cache, 14, stats);
+    let freed = clean_old_files(Path::new(&cocoapods_cache), 14, stats);
     stats.system_cache_freed += freed;
 
-    // Node.js related caches (can be fully cleaned)
-    let node_caches = [
-        format!("{}/Library/Caches/node-gyp", home), // node-gyp build cache
-        format!("{}/Library/Caches/ms-playwright", home), // Playwright browsers
+    // Playwright's browser downloads are *installed artifacts*, not a cache:
+    // `clean_dir_contents` here forced a full re-download of several hundred MB per
+    // browser on the next `playwright install`. Age-filter instead.
+    for cache in [
+        format!("{}/Library/Caches/ms-playwright", home),
         format!("{}/Library/Caches/ms-playwright-go", home),
+    ] {
+        if Path::new(&cache).exists() {
+            let freed = clean_old_files(Path::new(&cache), 60, stats);
+            stats.system_cache_freed += freed;
+        }
+    }
+
+    // Node build caches (genuinely regenerable, safe to wipe)
+    let node_caches = [
+        format!("{}/Library/Caches/node-gyp", home),
         format!("{}/Library/Caches/next-swc", home), // Next.js SWC cache
         format!("{}/Library/Caches/turbo", home),    // Turborepo cache
         format!("{}/Library/Caches/esbuild", home),  // esbuild cache
@@ -474,84 +535,106 @@ fn cleanup_dev_caches(config: &Config, stats: &mut CleanupStats, home: &str) {
     // Go module cache (can be large)
     let go_cache = format!("{}/Library/Caches/go-build", home);
     if Path::new(&go_cache).exists() {
-        let freed = clean_old_files(&go_cache, 14, stats);
+        let freed = clean_old_files(Path::new(&go_cache), 14, stats);
         stats.system_cache_freed += freed;
     }
 
     // Claude CLI cache
     let claude_cache = format!("{}/Library/Caches/claude-cli-nodejs", home);
     if Path::new(&claude_cache).exists() {
-        let freed = clean_old_files(&claude_cache, 7, stats);
+        let freed = clean_old_files(Path::new(&claude_cache), 7, stats);
         stats.system_cache_freed += freed;
     }
 
-    // bun global cache — already cleaned in cleanup_npm/cleanup_bun above
-    let bun_cache = format!("{}/.bun/install/cache", home);
-    let freed = clean_old_files(&bun_cache, 14, stats);
-    stats.system_cache_freed += freed;
-
-    if command_exists("docker") {
-        let _ = Command::new("docker")
-            .args(["image", "prune", "-f"])
-            .output();
-        // Also prune build cache
-        let _ = Command::new("docker")
-            .args(["builder", "prune", "-f"])
-            .output();
-    }
+    // `~/.bun/install/cache` is already handled by cleanup_npm above — cleaning it
+    // again here found ~0 bytes and mis-attributed any hits to system_cache_freed.
+    // Nothing further to do for bun here.
 }
 
-/// Clean Time Machine local snapshots
-fn cleanup_timemachine_snapshots(config: &Config, stats: &mut CleanupStats) {
-    utils::log("  🕐 Cleaning Time Machine snapshots...", config);
-
-    // List local snapshots - this works without sudo
-    if let Ok(output) = Command::new("tmutil")
-        .args(["listlocalsnapshots", "/"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            // Snapshot names start with "com.apple.TimeMachine"
-            if line.starts_with("com.apple.TimeMachine") {
-                // Try to delete - will fail silently without sudo
-                let _ = Command::new("tmutil")
-                    .args(["deletelocalsnapshots", line.trim()])
-                    .output();
-                stats.files_removed += 1;
+/// Time Machine local snapshots are intentionally left alone.
+///
+/// This used to call `tmutil deletelocalsnapshots` on every local snapshot 3x/day.
+/// The old comment claimed it "will fail silently without sudo", which is wrong —
+/// it succeeds without sudo for local snapshots on most configurations. That makes
+/// local snapshots the *only* backups on a machine, and deleting them unattended is
+/// not a decision a cleanup engine should make. `stats.files_removed` was also
+/// incremented unconditionally, counting removals that never happened.
+fn cleanup_timemachine_snapshots(config: &Config, _stats: &mut CleanupStats) {
+    if command_available("tmutil") {
+        if let Ok(output) = Command::new("tmutil")
+            .args(["listlocalsnapshots", "/"])
+            .output()
+        {
+            let count = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|l| l.starts_with("com.apple.TimeMachine"))
+                .count();
+            if count > 0 {
+                utils::log(
+                    &format!(
+                        "  🕐 {} local Time Machine snapshot(s) — left untouched",
+                        count
+                    ),
+                    config,
+                );
             }
         }
     }
+}
+
+/// Whether an application is currently running.
+///
+/// The cask upgrader already refuses to upgrade a running app, but the cleanup
+/// engine wiped Safari/Mail/Messages/Spotify/iTerm2/VS Code caches with no such
+/// check — mutating a live app's cache directory 3x/day.
+pub fn app_is_running(app_name: &str) -> bool {
+    Command::new("pgrep")
+        .arg("-x")
+        .arg(app_name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Clean Mail and Messages caches
 fn cleanup_mail_messages(config: &Config, stats: &mut CleanupStats, home: &str) {
     utils::log("  📧 Cleaning Mail & Messages caches...", config);
 
-    // Mail caches - safe to clean
-    let mail_caches = [
-        format!("{}/Library/Caches/com.apple.mail", home),
-        format!("{}/Library/Caches/com.apple.MobileSMS", home),
+    // Bundle-id suffix -> process name to liveness-check before wiping.
+    let running_apps = [
+        ("com.apple.mail", "Mail"),
+        ("com.apple.MobileSMS", "Messages"),
     ];
 
-    for cache in &mail_caches {
-        if Path::new(cache).exists() {
-            let freed = clean_dir_contents(cache, stats);
-            stats.system_cache_freed += freed;
+    for (bundle_suffix, process) in running_apps {
+        let cache = format!("{}/Library/Caches/{}", home, bundle_suffix);
+        if !Path::new(&cache).exists() {
+            continue;
         }
+        if app_is_running(process) {
+            utils::log(
+                &format!("  ℹ Skipping {} — {} is running", bundle_suffix, process),
+                config,
+            );
+            continue;
+        }
+        let freed = clean_dir_contents(&cache, stats);
+        stats.system_cache_freed += freed;
     }
 
     // Mail Downloads - clean old files (30+ days)
     let mail_downloads = format!("{}/Library/Mail Downloads", home);
     if Path::new(&mail_downloads).exists() {
-        let freed = clean_old_files(&mail_downloads, 30, stats);
+        let freed = clean_old_files(Path::new(&mail_downloads), 30, stats);
         stats.system_cache_freed += freed;
     }
 
     // Messages attachments - clean old files (30+ days)
     let messages_attachments = format!("{}/Library/Messages/Attachments", home);
     if Path::new(&messages_attachments).exists() {
-        let freed = clean_old_files(&messages_attachments, 30, stats);
+        let freed = clean_old_files(Path::new(&messages_attachments), 30, stats);
         stats.system_cache_freed += freed;
     }
 }
@@ -560,27 +643,36 @@ fn cleanup_mail_messages(config: &Config, stats: &mut CleanupStats, home: &str) 
 fn cleanup_browser_caches(config: &Config, stats: &mut CleanupStats, home: &str) {
     utils::log("  🌐 Cleaning browser caches...", config);
 
-    // Browser caches - can be fully cleaned (will regenerate)
+    // Browser caches regenerate on next launch, but only if the browser is closed.
     let browser_caches = [
-        format!("{}/Library/Caches/com.apple.Safari", home),
-        format!("{}/Library/Caches/com.brave.Browser", home),
-        format!("{}/Library/Caches/com.google.Chrome", home),
-        format!("{}/Library/Caches/org.mozilla.firefox", home),
-        format!("{}/Library/Caches/com.microsoft.edgemac", home),
-        format!("{}/Library/Caches/company.thebrowser.Browser", home), // Arc
+        ("com.apple.Safari", "Safari"),
+        ("com.brave.Browser", "Brave Browser"),
+        ("com.google.Chrome", "Google Chrome"),
+        ("org.mozilla.firefox", "firefox"),
+        ("com.microsoft.edgemac", "Microsoft Edge"),
+        ("company.thebrowser.Browser", "Arc"), // Arc
     ];
 
-    for cache in &browser_caches {
-        if Path::new(cache).exists() {
-            let freed = clean_dir_contents(cache, stats);
-            stats.system_cache_freed += freed;
+    for (bundle_suffix, process) in browser_caches {
+        let cache = format!("{}/Library/Caches/{}", home, bundle_suffix);
+        if !Path::new(&cache).exists() {
+            continue;
         }
+        if app_is_running(process) {
+            utils::log(
+                &format!("  ℹ Skipping {} — {} is running", bundle_suffix, process),
+                config,
+            );
+            continue;
+        }
+        let freed = clean_dir_contents(&cache, stats);
+        stats.system_cache_freed += freed;
     }
 
     // Safari local storage - clean old files (30+ days)
     let safari_storage = format!("{}/Library/Safari/LocalStorage", home);
     if Path::new(&safari_storage).exists() {
-        let freed = clean_old_files(&safari_storage, 30, stats);
+        let freed = clean_old_files(Path::new(&safari_storage), 30, stats);
         stats.system_cache_freed += freed;
     }
 }
@@ -603,19 +695,10 @@ fn cleanup_system_diagnostics(config: &Config, stats: &mut CleanupStats, home: &
         }
     }
 
-    // System-level diagnostic reports (may require permissions)
-    let system_diagnostics = "/Library/Logs/DiagnosticReports";
-    if Path::new(system_diagnostics).exists() {
-        let freed = clean_dir_contents(system_diagnostics, stats);
-        stats.system_cache_freed += freed;
-    }
-
-    // System logs - clean old files only (7+ days)
-    let var_log = "/var/log";
-    if Path::new(var_log).exists() {
-        // Only clean old .log files, not current ones
-        clean_old_log_files(var_log, 7, stats);
-    }
+    // `/Library/Logs/DiagnosticReports` and `/var/log` are root-owned. Every removal
+    // attempt there failed silently, so `clean_dir_contents` reported the apparent
+    // size as "freed" while nothing was actually deleted — inflating the summary with
+    // phantom wins forever. Skipped: it needs root, and the daemon runs unprivileged.
 }
 
 /// Clean old/deprecated Swift packages and unused Xcode frameworks
@@ -625,14 +708,14 @@ fn cleanup_xcode_packages(config: &Config, stats: &mut CleanupStats, home: &str)
     // Swift Package Manager - old cached packages (30+ days)
     let swiftpm_cache = format!("{}/Library/Caches/org.swift.swiftpm", home);
     if Path::new(&swiftpm_cache).exists() {
-        let freed = clean_old_dirs(&swiftpm_cache, 30, stats);
+        let freed = clean_old_dirs(Path::new(&swiftpm_cache), 30, stats);
         stats.system_cache_freed += freed;
     }
 
     // Swift PM repositories - old checkouts (60+ days)
     let swiftpm_repos = format!("{}/Library/org.swift.swiftpm/repositories", home);
     if Path::new(&swiftpm_repos).exists() {
-        let freed = clean_old_dirs(&swiftpm_repos, 60, stats);
+        let freed = clean_old_dirs(Path::new(&swiftpm_repos), 60, stats);
         stats.system_cache_freed += freed;
     }
 
@@ -642,7 +725,7 @@ fn cleanup_xcode_packages(config: &Config, stats: &mut CleanupStats, home: &str)
         home
     );
     if Path::new(&module_cache).exists() {
-        let freed = clean_old_dirs(&module_cache, 30, stats);
+        let freed = clean_old_dirs(Path::new(&module_cache), 30, stats);
         stats.system_cache_freed += freed;
     }
 
@@ -653,7 +736,7 @@ fn cleanup_xcode_packages(config: &Config, stats: &mut CleanupStats, home: &str)
         for entry in entries.flatten() {
             let source_packages = entry.path().join("SourcePackages");
             if source_packages.exists() {
-                let freed = clean_old_dirs(&source_packages.to_string_lossy(), 60, stats);
+                let freed = clean_old_dirs(&source_packages, 60, stats);
                 stats.system_cache_freed += freed;
             }
         }
@@ -665,15 +748,119 @@ fn cleanup_old_logs(config: &Config, stats: &mut CleanupStats, home: &str) {
 
     let log_dirs = [format!("{}/Library/Logs", home)];
 
+    // `config.log_file.parent()` is that same directory, so it used to be swept
+    // twice per run. One pass is enough.
     for log_dir in &log_dirs {
         if Path::new(log_dir).exists() {
             clean_old_log_files(log_dir, 7, stats);
         }
     }
+}
 
-    if let Some(log_parent) = config.log_file.parent() {
-        clean_old_log_files(&log_parent.to_string_lossy(), 7, stats);
+/// How long a temp entry must be idle before we consider it abandoned.
+const TEMP_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// The current user's uid, derived from `$HOME`'s own metadata.
+///
+/// Reading it from a file we already know we own avoids both a `getuid` syscall
+/// shim and a new dependency. Returns `None` if `$HOME` is unreadable, in which
+/// case `temp_entry_is_removable` refuses to delete anything.
+fn current_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let home = std::env::var("HOME").ok()?;
+        std::fs::metadata(home).ok().map(|m| m.uid())
     }
+    #[cfg(not(unix))]
+    {
+        Some(0)
+    }
+}
+
+/// Decide whether a `/tmp` entry is safe to delete.
+///
+/// This used to delete anything older than 24h with no checks at all, which meant:
+/// - other users' files, since macOS `/tmp` is world-writable,
+/// - the daemon's own `/tmp/mac-setup.lock`, unlinked while `run_update` held an
+///   exclusive flock on it. The flock survives on the orphaned inode, so a second
+///   instance then created a *new* file, locked it successfully, and mutual
+///   exclusion was silently lost.
+///
+/// Returns the entry's size when it is safe to remove.
+fn temp_entry_is_removable(path: &Path, metadata: &std::fs::Metadata) -> Option<u64> {
+    // Never delete symlinks: following them would let a link in /tmp redirect the
+    // recursive delete to an arbitrary location elsewhere on disk.
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+
+    // Only touch what this user owns.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != current_uid()? {
+            return None;
+        }
+    }
+
+    // mac-setup's own lock file — we may be holding it right now.
+    if path
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy() == "mac-setup.lock")
+    {
+        return None;
+    }
+
+    // Idle for long enough to be considered abandoned.
+    let modified = metadata.modified().ok()?;
+    let elapsed = modified.elapsed().ok()?;
+    if elapsed.as_secs() <= TEMP_MAX_AGE_SECS {
+        return None;
+    }
+
+    // Don't recurse into a directory that holds a live socket — that is how tmux,
+    // docker/podman and swiftpm keep their state, and deleting it out from under a
+    // running process breaks it.
+    if metadata.is_dir() && directory_holds_socket(path) {
+        return None;
+    }
+
+    Some(if metadata.is_file() {
+        metadata.len()
+    } else if metadata.is_dir() {
+        get_dir_size(path)
+    } else {
+        0
+    })
+}
+
+/// Whether a directory tree contains a socket, i.e. looks live.
+fn directory_holds_socket(dir: &Path) -> bool {
+    fn walk(dir: &Path, depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if meta.file_type().is_socket() || meta.file_type().is_fifo() {
+                    return true;
+                }
+            }
+            if meta.is_dir() && walk(&entry.path(), depth - 1) {
+                return true;
+            }
+        }
+        false
+    }
+
+    walk(dir, 3)
 }
 
 fn cleanup_temp_files(config: &Config, stats: &mut CleanupStats) {
@@ -685,41 +872,51 @@ fn cleanup_temp_files(config: &Config, stats: &mut CleanupStats) {
         std::env::var("TMPDIR").unwrap_or_default(),
     ];
 
+    // /tmp is a symlink to /private/tmp on macOS, so the two
+    // names are the same directory. Canonicalize so each tree
+    // is swept exactly once (and so a TMPDIR that lives under
+    // /tmp is not swept twice).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for temp_dir in &temp_dirs {
-        if temp_dir.is_empty() || !Path::new(temp_dir).exists() {
+        if temp_dir.is_empty() {
             continue;
         }
 
-        if let Ok(entries) = std::fs::read_dir(temp_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Ok(elapsed) = modified.elapsed() {
-                            if elapsed.as_secs() > 24 * 60 * 60 {
-                                let size = if metadata.is_file() {
-                                    metadata.len()
-                                } else if metadata.is_dir() {
-                                    get_dir_size(&entry.path().to_string_lossy())
-                                } else {
-                                    0
-                                };
+        let canonical = std::fs::canonicalize(temp_dir)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| temp_dir.clone());
+        if !seen.insert(canonical) {
+            continue;
+        }
 
-                                let removed = if metadata.is_file() {
-                                    std::fs::remove_file(entry.path()).is_ok()
-                                } else if metadata.is_dir() {
-                                    std::fs::remove_dir_all(entry.path()).is_ok()
-                                } else {
-                                    false
-                                };
+        if !Path::new(temp_dir).exists() {
+            continue;
+        }
 
-                                if removed {
-                                    stats.files_removed += 1;
-                                    stats.system_cache_freed += size;
-                                }
-                            }
-                        }
-                    }
-                }
+        let Ok(entries) = std::fs::read_dir(temp_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+
+            let Some(size) = temp_entry_is_removable(&path, &metadata) else {
+                continue;
+            };
+
+            let removed = if metadata.is_dir() {
+                std::fs::remove_dir_all(&path).is_ok()
+            } else {
+                std::fs::remove_file(&path).is_ok()
+            };
+
+            if removed {
+                stats.files_removed += 1;
+                stats.system_cache_freed += size;
             }
         }
     }
@@ -728,7 +925,8 @@ fn cleanup_temp_files(config: &Config, stats: &mut CleanupStats) {
 fn cleanup_stale_locks(config: &Config, stats: &mut CleanupStats) {
     utils::log("  🔒 Cleaning stale locks...", config);
 
-    let lock_patterns = [("/tmp", "stout"), ("/tmp", "brew-"), ("/tmp", ".bun-")];
+    // Stale lock files from tools that write into /tmp.
+    let lock_patterns = [("/tmp", "stout"), ("/tmp", ".bun-")];
 
     for (dir, pattern) in &lock_patterns {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -752,49 +950,7 @@ fn cleanup_stale_locks(config: &Config, stats: &mut CleanupStats) {
     }
 }
 
-fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn parse_size_from_output(output: &str) -> Option<u64> {
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        for part in parts {
-            if let Some(bytes) = parse_size_string(part) {
-                return Some(bytes);
-            }
-        }
-    }
-    None
-}
-
-fn parse_size_string(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.ends_with("GB") || s.ends_with("G") {
-        let num_str = s.trim_end_matches(|c: char| c.is_alphabetic());
-        num_str
-            .parse::<f64>()
-            .ok()
-            .map(|n| (n * 1_000_000_000.0) as u64)
-    } else if s.ends_with("MB") || s.ends_with("M") {
-        let num_str = s.trim_end_matches(|c: char| c.is_alphabetic());
-        num_str
-            .parse::<f64>()
-            .ok()
-            .map(|n| (n * 1_000_000.0) as u64)
-    } else if s.ends_with("KB") || s.ends_with("K") {
-        let num_str = s.trim_end_matches(|c: char| c.is_alphabetic());
-        num_str.parse::<f64>().ok().map(|n| (n * 1_000.0) as u64)
-    } else {
-        None
-    }
-}
-
-fn get_dir_size(path: &str) -> u64 {
+fn get_dir_size(path: &Path) -> u64 {
     let mut size: u64 = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -802,7 +958,7 @@ fn get_dir_size(path: &str) -> u64 {
                 if metadata.is_file() {
                     size += metadata.len();
                 } else if metadata.is_dir() {
-                    size += get_dir_size(&entry.path().to_string_lossy());
+                    size += get_dir_size(&entry.path());
                 }
             }
         }
@@ -810,11 +966,12 @@ fn get_dir_size(path: &str) -> u64 {
     size
 }
 
-fn clean_old_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u64 {
+fn clean_old_files(dir: &Path, max_age_days: u64, stats: &mut CleanupStats) -> u64 {
     let mut freed: u64 = 0;
+    let dry = *DRY_RUN.get_or_init(|| false);
     let max_age = Duration::from_secs(max_age_days * 24 * 60 * 60);
 
-    if !Path::new(dir).exists() {
+    if !dir.exists() {
         return 0;
     }
 
@@ -827,15 +984,19 @@ fn clean_old_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u6
                             let size = if metadata.is_file() {
                                 metadata.len()
                             } else if metadata.is_dir() {
-                                get_dir_size(&entry.path().to_string_lossy())
+                                get_dir_size(&entry.path())
                             } else {
                                 0
                             };
 
-                            let removed = if metadata.is_file() {
-                                std::fs::remove_file(entry.path()).is_ok()
-                            } else if metadata.is_dir() {
-                                std::fs::remove_dir_all(entry.path()).is_ok()
+                            let removed = if !dry {
+                                if metadata.is_file() {
+                                    std::fs::remove_file(entry.path()).is_ok()
+                                } else if metadata.is_dir() {
+                                    std::fs::remove_dir_all(entry.path()).is_ok()
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             };
@@ -854,11 +1015,12 @@ fn clean_old_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u6
     freed
 }
 
-fn clean_old_dirs(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u64 {
+fn clean_old_dirs(dir: &Path, max_age_days: u64, stats: &mut CleanupStats) -> u64 {
     let mut freed: u64 = 0;
+    let dry = *DRY_RUN.get_or_init(|| false);
     let max_age = Duration::from_secs(max_age_days * 24 * 60 * 60);
 
-    if !Path::new(dir).exists() {
+    if !dir.exists() {
         return 0;
     }
 
@@ -869,8 +1031,8 @@ fn clean_old_dirs(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u64
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
                             if elapsed > max_age {
-                                let size = get_dir_size(&entry.path().to_string_lossy());
-                                if std::fs::remove_dir_all(entry.path()).is_ok() {
+                                let size = get_dir_size(&entry.path());
+                                if !dry && std::fs::remove_dir_all(entry.path()).is_ok() {
                                     freed += size;
                                     stats.dirs_removed += 1;
                                 }
@@ -886,6 +1048,7 @@ fn clean_old_dirs(dir: &str, max_age_days: u64, stats: &mut CleanupStats) -> u64
 }
 
 fn clean_old_log_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) {
+    let dry = *DRY_RUN.get_or_init(|| false);
     let max_age = Duration::from_secs(max_age_days * 24 * 60 * 60);
 
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -896,7 +1059,10 @@ fn clean_old_log_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) {
                     if metadata.is_file() {
                         if let Ok(modified) = metadata.modified() {
                             if let Ok(elapsed) = modified.elapsed() {
-                                if elapsed > max_age && std::fs::remove_file(entry.path()).is_ok() {
+                                if elapsed > max_age
+                                    && !dry
+                                    && std::fs::remove_file(entry.path()).is_ok()
+                                {
                                     stats.logs_cleaned += 1;
                                 }
                             }
@@ -905,5 +1071,31 @@ fn clean_old_log_files(dir: &str, max_age_days: u64, stats: &mut CleanupStats) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_days_aggressive_is_zero() {
+        // 0 means "all" to stout; the string "all" is rejected by stout,
+        // which used to make aggressive mode prune nothing at all.
+        assert_eq!(prune_days_for(true, Some("7")), 0);
+        assert_eq!(prune_days_for(true, None), 0);
+    }
+
+    #[test]
+    fn prune_days_non_aggressive_reads_knob() {
+        assert_eq!(prune_days_for(false, Some("30")), 30);
+        assert_eq!(prune_days_for(false, Some(" 14 ")), 14);
+    }
+
+    #[test]
+    fn prune_days_defaults_when_knob_absent_or_invalid() {
+        assert_eq!(prune_days_for(false, None), 7);
+        assert_eq!(prune_days_for(false, Some("nonsense")), 7);
+        assert_eq!(prune_days_for(false, Some("")), 7);
     }
 }

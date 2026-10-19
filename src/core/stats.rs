@@ -11,6 +11,17 @@ pub struct UpdateStats {
 pub struct ComponentStats {
     pub upgraded: usize,
     pub skipped: usize,
+    /// Non-fatal problems (e.g. stout's output could not be parsed).
+    /// Surfaced in the summary so a run that could not confirm its own
+    /// result is never reported as a clean success.
+    pub errors: Vec<String>,
+}
+
+impl ComponentStats {
+    /// Whether anything needs attention: a skip or an unparseable result.
+    pub fn has_problems(&self) -> bool {
+        self.skipped > 0 || !self.errors.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +35,8 @@ pub struct CaskStats {
     pub skipped_source_missing: Vec<String>,
     pub skipped_timeout: Vec<String>,
     pub skipped_other: Vec<String>,
+    /// Casks never attempted because a shutdown signal arrived first.
+    pub skipped_shutdown: usize,
 }
 
 impl CaskStats {
@@ -35,10 +48,23 @@ impl CaskStats {
             + self.skipped_source_missing.len()
             + self.skipped_timeout.len()
             + self.skipped_other.len()
+            + self.skipped_shutdown
     }
 
+    /// Whether anything needs the user's attention.
+    ///
+    /// Previously only "app running" and "app source missing" counted, so a cask
+    /// blocked on an auth prompt or a timeout still produced a green "All updates
+    /// completed successfully!" and exit 0. Every skip bucket except `skipped_manual`
+    /// (a deliberate policy choice) is actionable.
     pub fn has_actionable_items(&self) -> bool {
-        !self.skipped_running.is_empty() || !self.skipped_source_missing.is_empty()
+        !self.skipped_running.is_empty()
+            || !self.skipped_source_missing.is_empty()
+            || !self.skipped_auth.is_empty()
+            || !self.skipped_timeout.is_empty()
+            || !self.skipped_invalid.is_empty()
+            || !self.skipped_other.is_empty()
+            || self.skipped_shutdown > 0
     }
 }
 
@@ -50,6 +76,9 @@ impl fmt::Display for UpdateStats {
         writeln!(f, "Formulae: {} upgraded", self.formulae.upgraded)?;
         if self.formulae.skipped > 0 {
             writeln!(f, "         {} skipped", self.formulae.skipped)?;
+        }
+        for err in &self.formulae.errors {
+            writeln!(f, "         ⚠ {}", err)?;
         }
 
         // Casks
@@ -145,11 +174,23 @@ impl fmt::Display for UpdateStats {
         }
 
         // Bun
-        if self.bun.upgraded > 0 || self.bun.skipped > 0 {
+        if self.bun.upgraded > 0 || self.bun.skipped > 0 || !self.bun.errors.is_empty() {
             writeln!(f, "Bun:      {} upgraded", self.bun.upgraded)?;
             if self.bun.skipped > 0 {
                 writeln!(f, "         {} with warnings", self.bun.skipped)?;
             }
+            for err in &self.bun.errors {
+                writeln!(f, "         ⚠ {}", err)?;
+            }
+        }
+
+        if self.casks.skipped_shutdown > 0 {
+            writeln!(
+                f,
+                "  ⏹ Not attempted — shutdown requested ({}):",
+                self.casks.skipped_shutdown
+            )?;
+            writeln!(f, "    → Run `mac-setup update` again to pick these up")?;
         }
 
         writeln!(f, "======================")?;

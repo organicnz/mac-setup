@@ -2,149 +2,167 @@
 
 ## Project Overview
 
-**brew-auto-update** is a production-grade automated Homebrew and NPM package management system for macOS. Written in Rust for safety and performance, it runs via launchd (3x daily) with intelligent pre-flight checks, comprehensive cleanup, and robust error handling.
+**mac-setup** is a macOS provisioning and auto-update system written in Rust. It is a
+single native binary that provisions a fresh Mac from `packages.toml` and then keeps
+it updated via a launchd agent running 3x daily.
+
+There is no Homebrew, npm, or Ruby requirement to *run* it. It compiles to a
+self-contained Mach-O binary that shells out to `stout`, `mise`, `bun`, `pipx`,
+`launchctl`, `osascript`, and `xattr`.
 
 ## Architecture
 
 ```
 src/
-├── lib.rs                    # Library exports
+├── lib.rs                    # Re-exports the public API
 ├── bin/
-│   ├── main.rs               # Main update binary (brew-auto-update)
-│   ├── install.rs            # Automated installer
-│   ├── setup.rs              # Development setup (lefthook, tools)
-│   ├── audit.rs              # System audit tool
-│   └── fix.rs                # Fix/repair utility
-└── core/
-    ├── mod.rs                # Module exports
-    ├── ops.rs                # Core operations (update, upgrade, quarantine)
-    ├── cleanup.rs            # Comprehensive cleanup system
-    ├── stats.rs              # Update statistics tracking
-    ├── checks.rs             # Pre-flight checks (network, disk)
-    └── utils.rs              # Logging, notifications, config
+│   └── main.rs               # CLI entry point — every subcommand is a clap variant
+├── core/
+│   ├── checks.rs             # Pre-flight: network, disk space
+│   ├── cleanup.rs            # Cleanup engine (stout, bun, cargo, system caches)
+│   ├── ops.rs                # Subprocess ops: stout/mise/pipx/bun, quarantine, timeouts
+│   ├── stats.rs              # UpdateStats / CaskStats / ComponentStats + Display
+│   ├── stout.rs              # The stout contract layer — every assumption about stout's output
+│   └── utils.rs              # Config, cached log handles, notifications, signal handlers
+└── commands/
+    └── provision.rs          # One-time provisioning from packages.toml
 ```
 
-## Key Features
+## Subcommands
 
-### Robust Cask Handling
-- **Timeout protection**: 30-minute limit per cask upgrade prevents hangs
-- **App recovery**: Automatically reinstalls apps disrupted during failed upgrades
-- **Quarantine removal**: Removes `com.apple.quarantine` from cask apps and formula binaries post-upgrade
-- **Cask ignore list**: Skip problematic casks (Battle.net, VMware Fusion, etc.)
-- **Categorized skip tracking**: Manual installers, running apps, auth required, timeouts
+| Command | What it does |
+|---------|--------------|
+| `mac-setup provision` | Install Xcode CLT, stout, mise, then everything in `packages.toml` |
+| `mac-setup update` | Pre-flight → pre-cleanup → parallel upgrades → quarantine → post-cleanup → notify |
+| `mac-setup fix` | Remove known-broken casks, fix bun state, run housekeeping |
+| `mac-setup audit <check> <files>` | `plist` / `secrets` / `markdown` — pre-commit checks |
+| `mac-setup setup` | Install lefthook, git hooks, clippy, rustfmt |
+| `mac-setup cleanup [--aggressive]` | Standalone cleanup pass |
+| `mac-setup install` | Build + install the binary and launchd plist |
 
-### Comprehensive Cleanup System
-- **Homebrew**: Cache, downloads, old versions, unused dependencies
-- **NPM**: Cache, logs, npx cache, temp node_modules
-- **Cargo**: Registry cache, src, git checkouts
-- **System caches**: Xcode, VS Code, CocoaPods, Gradle, Docker
-- **Aggressive mode**: Triggered when disk space is low
+## The update daemon
 
-### Pre-flight Checks
-- Network connectivity verification
-- Disk space validation (5GB minimum, aggressive cleanup if needed)
-- Homebrew installation detection
+`run_update` in `src/bin/main.rs` is the core loop. The ordering constraints that
+matter:
 
-### Safety Features
-- Exclusive file lock prevents concurrent runs
-- Graceful error handling with categorized reporting
-- Desktop notifications on completion
-- Separate error log file
+1. **Lock first.** `/tmp/mac-setup.lock` with an exclusive flock. A contending run
+   exits 0 (not a failure — launchd must not treat it as one).
+2. **`stout update` first.** Every later step depends on a fresh index.
+3. **Parallel fan-out.** stout formulae+casks (shared prefix, kept sequential),
+   mise, pipx, and bun run on independent prefixes and execute concurrently via
+   `std::thread::scope`.
+4. **Quarantine after casks.** Cask upgrades mutate `/Applications`, so the
+   quarantine passes run *after* the fan-out joins, never inside it.
+5. **Post-cleanup.** `cleanup_after_upgrades` sweeps only what the upgrades
+   refilled — `comprehensive_cleanup` already ran pre-flight.
 
-## Build Commands
+A `SHUTDOWN` flag (set by SIGTERM/SIGINT handlers in `utils.rs`) is checked between
+cask upgrades so `launchctl bootout` finishes the in-flight cask instead of dying
+mid-install.
 
-```bash
-# Build all binaries
-cargo build --release
+## Safety invariants
 
-# Run the main updater
-cargo run --release --bin brew-auto-update
+These were each real bugs. Do not reintroduce them.
 
-# Install the system (compiles + installs plist)
-cargo run --release --bin install
-
-# Setup development environment
-cargo run --bin setup
-
-# Run tests
-cargo test
-
-# Format code
-cargo fmt
-
-# Lint
-cargo clippy
-```
-
-## Important Constants
-
-Located in `src/core/ops.rs`:
-- `CASK_UPGRADE_TIMEOUT_SECS`: 1800 (30 minutes per cask)
-- `IGNORED_CASKS`: Apps to skip (manual installers, auth issues)
-
-## Quarantine Removal
-
-Two functions handle Gatekeeper quarantine removal:
-- `remove_all_quarantine()`: Scans installed casks and removes quarantine from `/Applications/*.app`
-- `remove_all_formula_quarantine()`: Scans `{homebrew_prefix}/bin` and removes quarantine from CLI binaries
-
-## Code Patterns
-
-### Logging
-```rust
-use brew_auto_update::utils::{log, log_error, Config};
-let config = Config::default();
-log("Message", &config);
-log_error("Error message", &config);
-```
-
-### Running Commands with Timeout
-```rust
-use crate::ops::run_with_timeout;
-match run_with_timeout(Command::new("brew").args(["upgrade", "--cask", name]), 1800) {
-    Ok(output) if output.status.success() => { /* success */ }
-    Err(e) if e.contains("Timeout") => { /* timed out */ }
-    _ => { /* other error */ }
-}
-```
-
-### Cleanup Stats
-```rust
-use brew_auto_update::cleanup::{comprehensive_cleanup, CleanupStats};
-let stats: CleanupStats = comprehensive_cleanup(&config, aggressive);
-println!("Freed: {}MB", stats.total_mb_freed());
-```
+- **`run_with_timeout` must drain pipes concurrently.** `wait_timeout` only polls
+  `try_wait()`; a child writing past the ~64 KiB pipe buffer blocks forever and is
+  then misreported as a timeout. See `ops.rs` for the threaded drain.
+- **`cleanup_temp_files` must not delete the lock file.** It used to `rm -rf` anything
+  >24h old in `/tmp` with no ownership check, unlinking `/tmp/mac-setup.lock` while
+  the daemon held a flock on it — which silently destroyed mutual exclusion.
+- **`HOME` must not be `.expect()`ed.** `Config::default()` runs for every
+  subcommand, so a missing `HOME` panicked the daemon before any log line was
+  written.
+- **App caches must not be wiped while the app is running.** The cask upgrader
+  already detects this; the cleanup engine must too.
+- **Docker is not installed.** The stack is podman-only. `packages.toml` must not
+  reintroduce docker/docker-desktop.
 
 ## Configuration
 
 Runtime config via environment:
-- `HOME`: Required for log/cache paths
-- Log files: `~/Library/Logs/brew-updates.log`, `brew-updates-error.log`
-- Lock file: `/tmp/brew-update.lock`
 
-Schedule (via launchd plist): 9 AM, 3 PM, 9 PM
+| Var | Where read | Default |
+|-----|-----------|---------|
+| `HOME` | `utils.rs` (required) | — |
+| `MIN_DISK_SPACE_GB` | `checks.rs` | `5` |
+| `TMPDIR` | `cleanup.rs` | — |
+| `MAC_SETUP_HOUR{1,2,3}` / `MAC_SETUP_MINUTE{1,2,3}` | `install` only | 9/0, 15/0, 21/0 |
+| `MAC_SETUP_NICE_LEVEL` | `install` only | `10` |
+| `MAC_SETUP_THROTTLE_INTERVAL` | `install` only | `300` |
+| `MAC_SETUP_EXIT_TIMEOUT` | `install` only | `7200` |
+| `MAC_SETUP_MIN_DISK_SPACE_GB` | `install` only | `5` |
+| `MAC_SETUP_PRUNE_DAYS` | `cleanup` only | `7` — stout `--prune` day count; `0` means "all" (aggressive) |
+| `STOUT_PREFIX` | `stout.rs` | auto-detected — `/opt/homebrew`, then `/usr/local` |
 
-## Testing
+`LOG_DIR` and `LOG_RETENTION_DAYS` are **not** consumed by the code. Log paths are
+derived from `$HOME/Library/Logs`; retention is the cleanup engine's 7-day sweep.
+
+Two placeholders in `config/com.USER.mac-setup.plist.template` are **not** substituted
+by `run_install` and are not read by any code: `{{PRUNE_DAYS}}` and
+`{{CACHE_MAX_AGE_DAYS}}`. The generated plist therefore contains the literal braces, and
+`MAC_SETUP_PRUNE_DAYS` in the plist fails to parse and falls back to the default of 7.
+The per-directory age thresholds in `cleanup.rs` (14, 30, 60 days) are hard-coded.
+
+## Log files
+
+```
+~/Library/Logs/mac-setup.log
+~/Library/Logs/mac-setup-error.log
+~/Library/Logs/mac-setup-stdout.log    (launchd StandardOutPath)
+~/Library/Logs/mac-setup-stderr.log    (launchd StandardErrorPath)
+```
+
+Log handles are cached process-wide (`OnceLock<Mutex<BufWriter<File>>>`) and
+buffered. Re-opening per line cost thousands of `openat` syscalls per run.
+
+## Build & test
 
 ```bash
-cargo test                    # Run all tests
-cargo test --bin main         # Test main binary only
-lefthook run pre-commit       # Run all pre-commit checks
+cargo build --release
+cargo test
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo run -q -- audit plist config/com.USER.mac-setup.plist.template
+cargo run -q -- audit secrets src/bin/main.rs
+cargo run -q -- audit markdown README.md
 ```
+
+Pre-commit runs through lefthook (`lefthook run pre-commit`). The hook config
+filters staged files by path inside the command — `{staged_files}` interpolates
+*all* staged files, not just the glob match.
 
 ## Dependencies
 
-- `chrono`: Timestamp formatting
-- `fs2`: File locking
-- `users`: Username detection
-- `regex`: Pattern matching
-- `serde`/`serde_json`: JSON parsing (brew info)
-- `signal-hook`: Signal handling
-- `wait-timeout`: Command timeout support
+| Crate | Why |
+|-------|-----|
+| `chrono` | Timestamp formatting |
+| `clap` | CLI derive |
+| `fs2` | File locking |
+| `regex` | Audit pattern matching |
+| `serde` + `toml` | `packages.toml` parsing |
+| `signal-hook` | SIGTERM/SIGINT graceful shutdown |
+| `wait-timeout` | Command timeout support |
 
-## macOS-Specific Notes
+`serde_json`, `users`, and `signal-hook` were removed as unused deps (signal-hook
+was re-added when graceful shutdown was wired up).
 
-- Uses launchd (not cron) for scheduling
-- Quarantine removal requires `xattr -dr com.apple.quarantine`
-- Desktop notifications via `osascript`
-- Supports both Intel (`/usr/local/bin/brew`) and Apple Silicon (`/opt/homebrew/bin/brew`)
+## macOS-specific notes
+
+- launchd, not cron. The plist template is `config/com.USER.mac-setup.plist.template`.
+- Quarantine removal needs `xattr -dr com.apple.quarantine`.
+- Notifications go through `osascript`. The message is escaped before interpolation
+  into the AppleScript string literal.
+- stout is at `~/.local/bin/stout` on Apple Silicon; mise at `~/.local/bin/mise`;
+  bun at `~/.bun/bin/bun`.
+
+## Testing
+
+Tests live in `src/core/mod.rs` (aggregator), `src/core/ops.rs` (run_with_timeout
+regressions), `src/core/stout.rs` (stout output parsers), `src/core/utils.rs`
+(applescript escaping), and `src/commands/provision.rs` (manifest parsing). All are
+hermetic — none spawn processes or touch the filesystem.
+
+The key regression test is `run_with_timeout_handles_output_larger_than_pipe_buffer`:
+a child writing 256 KiB must complete well under the timeout. On the pre-fix code it
+hung for the full timeout and returned `Err("Timeout exceeded")`.

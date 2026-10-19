@@ -1,17 +1,12 @@
 use clap::{Parser, Subcommand};
 use mac_setup::commands::provision;
-use mac_setup::core::utils::{log, log_error, send_notification, Config};
+use mac_setup::core::cleanup::DRY_RUN;
+use mac_setup::core::utils::{
+    install_signal_handlers, log, log_error, send_notification, shutdown_requested, stout_cmd,
+    Config,
+};
 use mac_setup::{checks, cleanup, ops, stats};
 use std::path::Path;
-
-fn stout_cmd() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = format!("{}/.local/bin/stout", home);
-    if Path::new(&local).exists() {
-        return local;
-    }
-    "stout".to_string()
-}
 
 // ============================================================================
 // CLI DEFINITION
@@ -56,6 +51,9 @@ enum Commands {
         /// Run aggressive cleanup (removes more cached data)
         #[arg(long)]
         aggressive: bool,
+        /// Dry run: report what would be freed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Install or reinstall the launchd agent for scheduled updates
@@ -70,10 +68,9 @@ fn main() {
     let cli = Cli::parse();
     let config = Config::default();
 
-    // Ensure log directory exists
-    if let Some(parent) = config.log_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Catch SIGTERM/SIGINT so a `launchctl bootout` or reboot lets the daemon finish
+    // the cask it is on rather than dying mid-install.
+    install_signal_handlers();
 
     match cli.command {
         Commands::Provision => run_provision(&config),
@@ -81,7 +78,10 @@ fn main() {
         Commands::Fix => run_fix(&config),
         Commands::Audit { check, files } => run_audit(&check, &files),
         Commands::Setup => run_setup(&config),
-        Commands::Cleanup { aggressive } => run_cleanup(&config, aggressive),
+        Commands::Cleanup {
+            aggressive,
+            dry_run,
+        } => run_cleanup(&config, aggressive, dry_run),
         Commands::Install => run_install(&config),
     }
 }
@@ -170,6 +170,8 @@ fn run_update(config: &Config) {
     }
 
     if !ops::check_stout(config) {
+        log_error("Aborting: stout not found", config);
+        send_notification("Skipped", "stout not found");
         std::process::exit(1);
     }
 
@@ -179,34 +181,108 @@ fn run_update(config: &Config) {
     // Update operations
     log("\n📦 Running package updates...", config);
 
+    // `stout update` refreshes the index every other step depends on, so it runs
+    // first and on its own.
     if !ops::update_stout(config) {
         overall_success = false;
     }
 
-    if !ops::upgrade_formulae(config) {
+    // Everything below is split across independent prefixes. stout formulae+casks share
+    // a single prefix and stout's own locks, so they stay in a single sequential
+    // thread; mise, pipx and bun are genuinely independent and run alongside.
+    //
+    // Previously all of these ran strictly back to back, so wall-clock cost was the
+    // sum of four unrelated network-bound phases.
+    //
+    // The other load-bearing ordering constraint: cask upgrades mutate /Applications,
+    // so the quarantine passes must not overlap them. Those run after the fan-out
+    // joins, not inside it.
+    log(
+        "  ↗ Running stout, mise, pipx and bun upgrades in parallel...",
+        config,
+    );
+
+    let (stout_result, mise_ok, pipx_ok, bun) = std::thread::scope(|scope| {
+        let stout_handle = scope.spawn(|| {
+            let formulae = ops::upgrade_formulae(config);
+            let casks = ops::upgrade_casks(config);
+            (formulae, casks)
+        });
+
+        // These report success/failure or return their own stats, so they never
+        // touch the shared UpdateStats.
+        let mise_handle = scope.spawn(|| ops::upgrade_mise(config));
+        let pipx_handle = scope.spawn(|| ops::upgrade_pipx(config));
+        let bun_handle = scope.spawn(|| ops::update_bun(config));
+
+        // A panicking worker must not take the daemon down with it:
+        // treat it as a failed upgrade and keep going so the rest of
+        // the run still reports.
+        let stout_result = match stout_handle.join() {
+            Ok(result) => (result, false),
+            Err(_) => (
+                (
+                    stats::ComponentStats::default(),
+                    stats::CaskStats::default(),
+                ),
+                true,
+            ),
+        };
+        let mise_ok = mise_handle.join().unwrap_or(false);
+        let pipx_ok = pipx_handle.join().unwrap_or(false);
+        let bun = bun_handle.join().unwrap_or_else(|_| Default::default());
+
+        (stout_result, mise_ok, pipx_ok, bun)
+    });
+
+    let ((formulae, casks), stout_panicked) = stout_result;
+
+    // Hard failures: the update infrastructure itself failed, a worker
+    // panicked, or stout's output could not be parsed (drift). Drift is
+    // a hard failure because we cannot confirm the run did anything.
+    if !mise_ok || !pipx_ok || stout_panicked {
+        overall_success = false;
+    }
+    if !formulae.errors.is_empty() || !bun.errors.is_empty() {
         overall_success = false;
     }
 
-    update_stats.casks = ops::upgrade_casks(config);
+    update_stats.formulae = formulae;
+    update_stats.casks = casks;
+    update_stats.bun = bun;
+
+    // Package-level skips and warnings are needs-attention, not failures:
+    // a cask blocked on an auth prompt or a formula with no bottle needs a
+    // human, but the daemon did its job. They surface as a soft "some
+    // items require attention" (exit 0) rather than a green "all success".
+    let needs_attention = update_stats.casks.has_actionable_items()
+        || update_stats.formulae.has_problems()
+        || update_stats.bun.has_problems();
+
+    // Quarantine stripping runs after the cask upgrades have settled, since it reads
+    // the freshly installed .app bundles.
     ops::remove_all_quarantine(config);
     ops::remove_all_formula_quarantine(config);
 
-    // Upgrade mise-managed runtimes and tools
-    if !ops::upgrade_mise(config) {
-        overall_success = false;
+    // If we were signalled partway through, stop before the second cleanup sweep
+    // rather than starting a long operation we cannot finish.
+    if shutdown_requested() {
+        log(
+            "\n⚠ Shutdown requested — skipping post-cleanup and finishing early",
+            config,
+        );
+        send_notification(
+            "Stopped",
+            "Shutdown requested; run again to finish remaining updates",
+        );
+        std::process::exit(1);
     }
 
-    // Upgrade pipx apps
-    ops::upgrade_pipx(config);
-
-    // Update bun globals
-    if !ops::update_bun(config) {
-        overall_success = false;
-    }
-
-    // Post-task cleanup
+    // Post-task cleanup. The pre-flight sweep above already ran every stage; running
+    // the identical sweep again immediately afterwards doubled the cost of every run
+    // for no benefit. Only the post-upgrade residue is swept here.
     log("\n", config);
-    let post_cleanup_stats = cleanup::comprehensive_cleanup(config, false);
+    let post_cleanup_stats = cleanup::cleanup_after_upgrades(config);
 
     // Summary
     log("\n", config);
@@ -271,15 +347,7 @@ fn run_update(config: &Config) {
     }
 
     // Disk space
-    if let Ok(output) = std::process::Command::new("df").args(["-h", "/"]).output() {
-        let df_output = String::from_utf8_lossy(&output.stdout);
-        for line in df_output.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                log(&format!("\n💾 Disk space available: {}", parts[3]), config);
-            }
-        }
-    }
+    log_disk_space(config);
 
     log(
         "\n═══════════════════════════════════════════════════════════",
@@ -287,7 +355,7 @@ fn run_update(config: &Config) {
     );
 
     if overall_success {
-        if update_stats.casks.has_actionable_items() {
+        if needs_attention {
             mac_setup::core::utils::log(
                 "✅ Updates completed with some items requiring attention",
                 config,
@@ -311,7 +379,6 @@ fn run_update(config: &Config) {
 // ============================================================================
 
 fn run_fix(config: &Config) {
-    use std::io::{self, Write};
     use std::process::{Command, Stdio};
 
     log("==========================================", config);
@@ -346,6 +413,8 @@ fn run_fix(config: &Config) {
         "ubiquiti-unifi-controller",
     ];
 
+    let mut failures = 0usize;
+
     log("\n[1/4] Cleaning up broken/missing casks...", config);
     for cask in casks_to_remove {
         let status = Command::new(stout_cmd())
@@ -356,9 +425,6 @@ fn run_fix(config: &Config) {
 
         if let Ok(s) = status {
             if s.success() {
-                print!("  - Uninstalling {}... ", cask);
-                io::stdout().flush().unwrap();
-
                 let uninstall_status = Command::new(stout_cmd())
                     .args(["uninstall", "--cask", cask])
                     .stdout(Stdio::null())
@@ -366,11 +432,14 @@ fn run_fix(config: &Config) {
                     .status();
 
                 match uninstall_status {
-                    Ok(us) if us.success() => println!("✓"),
-                    _ => println!("✗ (Failed)"),
+                    Ok(us) if us.success() => log(&format!("  - ✓ Uninstalled {}", cask), config),
+                    _ => {
+                        failures += 1;
+                        log_error(&format!("  - ✗ Failed to uninstall {}", cask), config);
+                    }
                 }
             } else {
-                println!("  - {} already removed.", cask);
+                log(&format!("  - {} already removed.", cask), config);
             }
         }
     }
@@ -384,87 +453,95 @@ fn run_fix(config: &Config) {
 
     if let Ok(s) = flutter_check {
         if s.success() {
-            print!("  - Uninstalling flutter... ");
-            io::stdout().flush().unwrap();
             let status = Command::new(stout_cmd())
                 .args(["uninstall", "--cask", "flutter"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
                 .status();
             match status {
-                Ok(us) if us.success() => println!("✓"),
-                _ => println!("✗ (Failed)"),
+                Ok(us) if us.success() => log("  - ✓ Uninstalled flutter", config),
+                _ => {
+                    failures += 1;
+                    log_error("  - ✗ Failed to uninstall flutter", config);
+                }
             }
         } else {
-            println!("  - Flutter already removed.");
+            log("  - Flutter already removed.", config);
         }
     }
 
     log("\n[3/4] Fixing invalid bun global package...", config);
-    print!("  - Removing invalid package... ");
-    io::stdout().flush().unwrap();
     let bun_status = Command::new("bun")
         .args(["remove", "--global", "@anthropic-ai/.claude-code-2DTsDk1V"])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status();
     match bun_status {
-        Ok(s) if s.success() => println!("✓"),
-        _ => println!("✗ (Failed or not present)"),
+        Ok(s) if s.success() => log("  - ✓ Removed invalid package", config),
+        _ => {
+            failures += 1;
+            log("  - ✗ Failed or package not present", config);
+        }
     }
 
-    print!("  - Cleaning bun cache... ");
-    io::stdout().flush().unwrap();
     let cache_status = Command::new("bun")
         .args(["pm", "cache", "rm"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     match cache_status {
-        Ok(s) if s.success() => println!("✓"),
-        _ => println!("✗"),
+        Ok(s) if s.success() => log("  - ✓ Cleaned bun cache", config),
+        _ => {
+            failures += 1;
+            log_error("  - ✗ Failed to clean bun cache", config);
+        }
     }
 
     log("\n[4/4] Final Housekeeping...", config);
 
-    print!("  - Running stout cleanup... ");
-    io::stdout().flush().unwrap();
     let cleanup = Command::new(stout_cmd())
         .args(["cleanup", "-s"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     if cleanup.map(|s| s.success()).unwrap_or(false) {
-        println!("✓");
+        log("  - ✓ stout cleanup complete", config);
     } else {
-        println!("✗");
+        failures += 1;
+        log_error("  - ✗ stout cleanup failed", config);
     }
 
-    print!("  - Running stout autoremove... ");
-    io::stdout().flush().unwrap();
     let autoremove = Command::new(stout_cmd())
         .arg("autoremove")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     if autoremove.map(|s| s.success()).unwrap_or(false) {
-        println!("✓");
+        log("  - ✓ stout autoremove complete", config);
     } else {
-        println!("✗");
+        failures += 1;
+        log_error("  - ✗ stout autoremove failed", config);
     }
 
-    println!("  - Checking stout doctor...");
+    log("  - Checking stout doctor...", config);
     let _ = Command::new(stout_cmd()).arg("doctor").status();
 
     log("\n==========================================", config);
-    log("Fix Complete!", config);
-
-    let df = Command::new("df").args(["-h", "/"]).output();
-    if let Ok(out) = df {
-        log("Current Disk Space:", config);
-        log(&String::from_utf8_lossy(&out.stdout), config);
+    if failures == 0 {
+        log("Fix Complete!", config);
+    } else {
+        log_error(
+            &format!("Fix finished with {failures} failed step(s)"),
+            config,
+        );
     }
+
+    log_disk_space(config);
     log("==========================================", config);
+
+    if failures > 0 {
+        std::process::exit(1);
+    }
 }
 
 // ============================================================================
@@ -472,10 +549,6 @@ fn run_fix(config: &Config) {
 // ============================================================================
 
 fn run_audit(check: &str, files: &[String]) {
-    use regex::Regex;
-    use std::fs;
-    use std::process::Command;
-
     if files.is_empty() {
         eprintln!("Usage: mac-setup audit <check> <files...>");
         std::process::exit(1);
@@ -523,7 +596,7 @@ fn run_audit(check: &str, files: &[String]) {
 
     // Inner helpers
     fn check_plist(path: &str) -> bool {
-        let content = match fs::read_to_string(path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return true,
         };
@@ -540,20 +613,49 @@ fn run_audit(check: &str, files: &[String]) {
             valid = false;
         }
 
-        let temp_content = Regex::new(r"\{\{[^}]*\}\}")
+        let temp_content = regex::Regex::new(r"\{\{[^}]*\}\}")
             .unwrap()
             .replace_all(&content, "1");
-        let temp_path = format!("/tmp/temp_plist_{}", std::process::id());
-        fs::write(&temp_path, temp_content.as_bytes()).unwrap();
 
-        let status = Command::new("plutil")
+        // A missing `plutil` used to map to `.unwrap_or(false)`, i.e. "invalid
+        // plist" — producing a false pre-commit failure instead of a skip. Probe it
+        // first, matching how check_markdown handles a missing linter.
+        if std::process::Command::new("plutil")
+            .arg("-help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            println!("  ℹ plutil unavailable — skipping XML validation");
+            return valid;
+        }
+
+        // Write to a private temp dir rather than a predictable /tmp path, which
+        // another local user could pre-create as a symlink. This runs from a
+        // pre-commit hook.
+        let temp_dir = std::env::temp_dir().join(format!("mac-setup-audit-{}", std::process::id()));
+        if std::fs::create_dir_all(&temp_dir).is_err() {
+            println!("  ℹ could not create temp dir — skipping XML validation");
+            return valid;
+        }
+        let temp_path = temp_dir.join("template.plist");
+        if std::fs::write(&temp_path, temp_content.as_bytes()).is_err() {
+            let _ = std::fs::remove_dir(&temp_dir);
+            println!("  ℹ could not write temp plist — skipping XML validation");
+            return valid;
+        }
+
+        let status = std::process::Command::new("plutil")
             .arg("-lint")
             .arg(&temp_path)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
 
-        let _ = fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_dir(&temp_dir);
 
         if !status {
             eprintln!("❌ Invalid XML structure in {}", path);
@@ -564,7 +666,7 @@ fn run_audit(check: &str, files: &[String]) {
     }
 
     fn check_secrets(path: &str) -> bool {
-        let content = match fs::read_to_string(path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return true,
         };
@@ -591,7 +693,7 @@ fn run_audit(check: &str, files: &[String]) {
 
         let mut valid = true;
         for (name, pattern) in patterns.iter() {
-            let re = Regex::new(pattern).unwrap();
+            let re = regex::Regex::new(pattern).unwrap();
             if re.is_match(&content) {
                 eprintln!("❌ Potential secret found in {}: {}", path, name);
                 valid = false;
@@ -601,18 +703,42 @@ fn run_audit(check: &str, files: &[String]) {
     }
 
     fn check_markdown(path: &str) -> bool {
-        let status = Command::new("which").arg("markdownlint").status();
-        if status.is_err() || !status.unwrap().success() {
+        let available = std::process::Command::new("which")
+            .arg("markdownlint")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !available {
             println!("⚠️  markdownlint not installed, skipping...");
             return true;
         }
 
         println!("  Checking {}...", path);
-        Command::new("markdownlint")
+        std::process::Command::new("markdownlint")
             .arg(path)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+}
+
+// ============================================================================
+// DISK SPACE HELPER
+// ============================================================================
+
+/// Log the current disk space available on `/`.
+///
+/// Called from both `run_update` and `run_fix` to avoid duplicating the
+/// `df -h /` + column-index logic in two places.
+fn log_disk_space(config: &Config) {
+    if let Ok(output) = std::process::Command::new("df").args(["-h", "/"]).output() {
+        let df_output = String::from_utf8_lossy(&output.stdout);
+        for line in df_output.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                log(&format!("\n💾 Disk space available: {}", parts[3]), config);
+            }
+        }
     }
 }
 
@@ -639,12 +765,16 @@ fn run_setup(config: &Config) {
     // Install lefthook
     if Command::new("which").arg("lefthook").status().is_err() {
         log("📦 Installing lefthook...", config);
-        let status = Command::new(stout_cmd())
+        match Command::new(stout_cmd())
             .args(["install", "lefthook"])
             .status()
-            .unwrap();
-        if !status.success() {
-            eprintln!("Failed to install lefthook");
+        {
+            Ok(s) if !s.success() => log_error("Failed to install lefthook", config),
+            Err(e) => log_error(
+                &format!("Failed to run stout to install lefthook: {}", e),
+                config,
+            ),
+            _ => {}
         }
     } else {
         log("✅ lefthook already installed", config);
@@ -667,9 +797,8 @@ fn run_setup(config: &Config) {
 
     // Install hooks
     log("\n🪝 Installing git hooks...", config);
-    let status = Command::new("lefthook").arg("install").status().unwrap();
-    if !status.success() {
-        eprintln!("Failed to install git hooks");
+    if let Err(e) = Command::new("lefthook").arg("install").status() {
+        log_error(&format!("Failed to install git hooks: {}", e), config);
     }
 
     log("\n✅ Development environment ready!", config);
@@ -682,7 +811,10 @@ fn run_setup(config: &Config) {
 // CLEANUP (standalone)
 // ============================================================================
 
-fn run_cleanup(config: &Config, aggressive: bool) {
+fn run_cleanup(config: &Config, aggressive: bool, dry_run: bool) {
+    // Set the global dry-run flag so the low-level helpers can skip removals
+    let _ = DRY_RUN.set(dry_run);
+
     log(
         &format!(
             "🧹 Running {} cleanup...",
@@ -697,6 +829,16 @@ fn run_cleanup(config: &Config, aggressive: bool) {
 
     let stats = cleanup::comprehensive_cleanup(config, aggressive);
     log(&format!("{}", stats), config);
+
+    // `stats.errors` used to be ignored entirely, so a run that recorded a problem
+    // still reported success.
+    if stats.errors.is_empty() {
+        return;
+    }
+    for err in &stats.errors {
+        log_error(err, config);
+    }
+    std::process::exit(1);
 }
 
 // ============================================================================
@@ -713,8 +855,15 @@ fn run_install(config: &Config) {
     log("mac-setup — Launchd Agent Installer", config);
     log("==========================================", config);
 
-    let user = env::var("USER").expect("USER not set");
-    let home = env::var("HOME").expect("HOME not set");
+    let user = env::var("USER").unwrap_or_default();
+    let home = env::var("HOME").unwrap_or_default();
+    if user.is_empty() || home.is_empty() {
+        log_error(
+            "USER or HOME is not set — cannot determine install paths",
+            config,
+        );
+        std::process::exit(1);
+    }
 
     log(&format!("Installing for user: {}", user), config);
     log(&format!("Home directory: {}", home), config);
@@ -728,10 +877,16 @@ fn run_install(config: &Config) {
 
     // Build release binary
     log("Building mac-setup binary...", config);
-    let status = Command::new("cargo")
+    let status = match Command::new("cargo")
         .args(["build", "--release", "--bin", "mac-setup"])
         .status()
-        .expect("Failed to execute cargo");
+    {
+        Ok(s) => s,
+        Err(e) => {
+            log_error(&format!("Failed to execute cargo: {e}"), config);
+            std::process::exit(1);
+        }
+    };
 
     if !status.success() {
         eprintln!("✗ Build failed.");
@@ -742,37 +897,66 @@ fn run_install(config: &Config) {
     let scripts_dir = PathBuf::from(&home).join("Scripts");
     if !scripts_dir.exists() {
         log(&format!("Creating {}...", scripts_dir.display()), config);
-        fs::create_dir_all(&scripts_dir).expect("Failed to create Scripts dir");
+        if let Err(e) = fs::create_dir_all(&scripts_dir) {
+            log_error(&format!("Failed to create Scripts dir: {e}"), config);
+            std::process::exit(1);
+        }
     }
 
-    let target_bin = PathBuf::from("target/release/mac-setup");
+    // `target/release/mac-setup` and `config/*.plist.template` are both relative to
+    // the repository root. `install` is the documented fresh-Mac bootstrap step and is
+    // routinely run from elsewhere, so resolve the repo root from the current
+    // executable's path instead of assuming the working directory.
+    let repo_root = match repo_root_from_exe() {
+        Some(root) => root,
+        None => {
+            log_error(
+                "Could not locate the mac-setup repository root from the running binary",
+                config,
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let target_bin = repo_root.join("target/release/mac-setup");
     let dest_bin = scripts_dir.join("mac-setup");
 
     log(
         &format!("Installing binary to {}...", dest_bin.display()),
         config,
     );
-    fs::copy(&target_bin, &dest_bin).expect("Failed to copy binary");
+    if let Err(e) = fs::copy(&target_bin, &dest_bin) {
+        log_error(&format!("Failed to copy binary: {e}"), config);
+        std::process::exit(1);
+    }
 
     // Read plist template
-    let template_content = fs::read_to_string("config/com.USER.mac-setup.plist.template")
-        .expect("Failed to read plist template");
+    let template_path = repo_root.join("config/com.USER.mac-setup.plist.template");
+    let template_content = match fs::read_to_string(&template_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log_error(
+                &format!("Failed to read {}: {e}", template_path.display()),
+                config,
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Schedule config
-    let hour1 = env::var("BREW_UPDATE_HOUR1").unwrap_or("9".to_string());
-    let minute1 = env::var("BREW_UPDATE_MINUTE1").unwrap_or("0".to_string());
-    let hour2 = env::var("BREW_UPDATE_HOUR2").unwrap_or("15".to_string());
-    let minute2 = env::var("BREW_UPDATE_MINUTE2").unwrap_or("0".to_string());
-    let hour3 = env::var("BREW_UPDATE_HOUR3").unwrap_or("21".to_string());
-    let minute3 = env::var("BREW_UPDATE_MINUTE3").unwrap_or("0".to_string());
-    let nice = env::var("BREW_UPDATE_NICE_LEVEL").unwrap_or("10".to_string());
-    let throttle = env::var("BREW_UPDATE_THROTTLE_INTERVAL").unwrap_or("300".to_string());
-    let timeout = env::var("BREW_UPDATE_EXIT_TIMEOUT").unwrap_or("7200".to_string());
-    let retention = env::var("BREW_UPDATE_LOG_RETENTION_DAYS").unwrap_or("1".to_string());
-    let min_disk = env::var("BREW_UPDATE_MIN_DISK_SPACE_GB").unwrap_or("5".to_string());
+    let hour1 = env::var("MAC_SETUP_HOUR1").unwrap_or("9".to_string());
+    let minute1 = env::var("MAC_SETUP_MINUTE1").unwrap_or("0".to_string());
+    let hour2 = env::var("MAC_SETUP_HOUR2").unwrap_or("15".to_string());
+    let minute2 = env::var("MAC_SETUP_MINUTE2").unwrap_or("0".to_string());
+    let hour3 = env::var("MAC_SETUP_HOUR3").unwrap_or("21".to_string());
+    let minute3 = env::var("MAC_SETUP_MINUTE3").unwrap_or("0".to_string());
+    let nice = env::var("MAC_SETUP_NICE_LEVEL").unwrap_or("10".to_string());
+    let throttle = env::var("MAC_SETUP_THROTTLE_INTERVAL").unwrap_or("300".to_string());
+    let timeout = env::var("MAC_SETUP_EXIT_TIMEOUT").unwrap_or("7200".to_string());
+    let min_disk = env::var("MAC_SETUP_MIN_DISK_SPACE_GB").unwrap_or("5".to_string());
 
-    // Replace template placeholders — binary path goes into the first <string> slot
-    // The plist template already has <string>update</string> as a separate entry
+    // `LOG_RETENTION_DAYS` is no longer templated: log retention is enforced by the
+    // cleanup engine's 7-day sweep over ~/Library/Logs, not by an env var.
     let plist_content = template_content
         .replace("{{USER}}", &user)
         .replace("{{HOME}}", &home)
@@ -785,36 +969,71 @@ fn run_install(config: &Config) {
         .replace("{{NICE_LEVEL}}", &nice)
         .replace("{{THROTTLE_INTERVAL}}", &throttle)
         .replace("{{EXIT_TIMEOUT}}", &timeout)
-        .replace("{{LOG_RETENTION_DAYS}}", &retention)
         .replace("{{MIN_DISK_SPACE_GB}}", &min_disk);
 
     // Write plist
     let plist_name = format!("com.{}.mac-setup.plist", user);
-    let plist_path = PathBuf::from(&home)
-        .join("Library/LaunchAgents")
-        .join(&plist_name);
+    let launch_agents = PathBuf::from(&home).join("Library/LaunchAgents");
+    let plist_path = launch_agents.join(&plist_name);
 
     log(
         &format!("Writing plist to {}...", plist_path.display()),
         config,
     );
-    fs::write(&plist_path, plist_content).expect("Failed to write plist");
+    // LaunchAgents does not exist on a machine that has never had an agent installed.
+    if let Err(e) = fs::create_dir_all(&launch_agents) {
+        log_error(
+            &format!("Failed to create {}: {e}", launch_agents.display()),
+            config,
+        );
+        std::process::exit(1);
+    }
+    if let Err(e) = fs::write(&plist_path, plist_content) {
+        log_error(&format!("Failed to write plist: {e}"), config);
+        std::process::exit(1);
+    }
 
     // Reload launch agent
     log("Reloading launch agent...", config);
+    // Inform the user if we're reloading an already-running agent.
+    let already_loaded = Command::new("launchctl")
+        .args(["list", &format!("com.{}.mac-setup", user)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if already_loaded {
+        log(
+            "ℹ Agent already loaded — reloading with new configuration",
+            config,
+        );
+    }
     let _ = Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .output();
     let status = Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
-        .status()
-        .expect("Failed to load plist");
+        .status();
 
-    if status.success() {
-        log("✓ Launchd agent loaded", config);
-    } else {
-        eprintln!("⚠ Warning: launchctl load returned non-zero exit code");
+    match status {
+        Ok(s) if s.success() => log("✓ Launchd agent loaded", config),
+        Ok(_) => eprintln!("⚠ Warning: launchctl load returned non-zero exit code"),
+        Err(e) => log_error(&format!("Failed to run launchctl load: {e}"), config),
     }
+
+    // Report the schedule that was actually installed, not a hardcoded string.
+    let describe = |h: &str, m: &str| {
+        let (Ok(hh), Ok(mm)) = (h.parse::<u32>(), m.parse::<u32>()) else {
+            return format!("{h}:{m}");
+        };
+        let ampm = if hh < 12 { "AM" } else { "PM" };
+        let h12 = match hh % 12 {
+            0 => 12,
+            n => n,
+        };
+        format!("{h12}:{mm:02} {ampm}")
+    };
 
     log("\n==========================================", config);
     log("Installation Complete!", config);
@@ -822,8 +1041,29 @@ fn run_install(config: &Config) {
     log(&format!("\nBinary: {}", dest_bin.display()), config);
     log(&format!("Plist:  {}", plist_path.display()), config);
     log(
-        "\nThe update daemon runs automatically at 9 AM, 3 PM, and 9 PM.",
+        &format!(
+            "The update daemon runs automatically at {}, {} and {}.",
+            describe(&hour1, &minute1),
+            describe(&hour2, &minute2),
+            describe(&hour3, &minute3)
+        ),
         config,
     );
     log("Run manually: mac-setup update", config);
+}
+
+/// Walk up from the running executable to find the repository root.
+///
+/// Covers `target/debug/mac-setup` and `target/release/mac-setup`; falls back to the
+/// current directory's ancestors so the command still works from a source checkout.
+fn repo_root_from_exe() -> Option<std::path::PathBuf> {
+    let start = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok())?;
+
+    start
+        .ancestors()
+        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join("config").is_dir())
+        .map(Path::to_path_buf)
 }

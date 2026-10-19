@@ -41,12 +41,9 @@ packages = [
   "cline",
   "cloudflared",
   "cocoapods",
-  "codex",
   "curl",
   "dart-sdk",
   "ddrescue",
-  "deno",          # also in mise; stout owns binary
-  "docker-compose",
   "doctl",
   "duckdb",
   "duf",
@@ -66,7 +63,6 @@ packages = [
   "git-filter-repo",
   "git-lfs",
   "gnupg",
-  "go",            # also in mise
   "gogcli",
   "gradle",
   "hashcat",
@@ -98,10 +94,7 @@ packages = [
   "nmap",
   "openapi-generator",
   "openbao",
-  "openjdk",
-  "openjdk@21",
   "openssh",
-  "packer",
   "phoneinfoga",
   "php",
   "pidof",
@@ -111,13 +104,9 @@ packages = [
   "postgresql@17",
   "pre-commit",
   "protobuf",
-  "pulumi",
-  "python@3.12",   # also in mise
-  "python@3.13",
   "redis",
   "ripgrep",
   "rm-improved",
-  "ruby",          # also in mise
   "rustup",
   "shellcheck",
   "sherlock",
@@ -144,7 +133,6 @@ packages = [
   "zoxide",
   # Via taps
   "gofireflyio/aiac/aiac",
-  "getsentry/tools/sentry-cli",
   "openhue/cli/openhue-cli",
   "pulumi/tap/pulumi",
   "supabase/tap/supabase",
@@ -167,8 +155,6 @@ packages = [
   "dbeaver-community",
   "deepl",
   "discord",
-  "docker",
-  "docker-desktop",
   "drivedx",
   "elmedia-player",
   "figma",
@@ -238,7 +224,6 @@ packages = [
   "claude-code",
   "codex",
   "devin-desktop",
-  "lm-studio",
   "opencat",
   # Swift/iOS
   "skip",
@@ -250,8 +235,6 @@ packages = [
 [mise]
 tools = [
   "node@lts",
-  "python@3.12",
-  "python@3.13",
   "go@latest",
   "deno@latest",
   "ruby@latest",

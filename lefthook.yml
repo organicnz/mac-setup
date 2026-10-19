@@ -1,9 +1,14 @@
 # Lefthook configuration for mac-setup
 # https://github.com/evilmartians/lefthook
 
+# NOTE: `{staged_files}` interpolates ALL staged files, not just the ones the
+# `glob` matched. A glob that runs the hook whenever any file is staged therefore
+# still hands the hook the entire staged set, which is why plist-check used to run
+# `audit plist` over a staged README.md and fail the {{USER}}/{{HOME}} check.
+# The fix is to filter staged files by path inside the command itself.
 pre-commit:
   parallel: true
-  
+
   commands:
     # Format check
     cargo-fmt:
@@ -14,21 +19,28 @@ pre-commit:
     cargo-clippy:
       glob: "**/*.rs"
       run: cargo clippy -- -D warnings
-    
+
     # Validate plist template
     plist-check:
       glob: "config/*.plist.template"
-      run: cargo run -q -- audit plist {staged_files}
-    
+      run: |
+        files=$(git diff --cached --name-only --diff-filter=ACM | grep '^config/.*\.plist\.template$' || true)
+        if [ -n "$files" ]; then
+          cargo run -q -- audit plist $files
+        fi
+
     # Check for secrets/tokens
     secrets-check:
-      glob: "*"
       run: cargo run -q -- audit secrets {staged_files}
-    
+
     # Markdown linting
     markdown-lint:
       glob: "*.md"
-      run: cargo run -q -- audit markdown {staged_files}
+      run: |
+        files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$' || true)
+        if [ -n "$files" ]; then
+          cargo run -q -- audit markdown $files
+        fi
 
 pre-push:
   commands:

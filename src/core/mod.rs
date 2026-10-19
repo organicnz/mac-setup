@@ -2,10 +2,12 @@ pub mod checks;
 pub mod cleanup;
 pub mod ops;
 pub mod stats;
+pub mod stout;
 pub mod utils;
 
 #[cfg(test)]
 mod tests {
+    use super::cleanup::CleanupStats;
     use super::stats::*;
     use super::utils::*;
     use std::path::PathBuf;
@@ -118,8 +120,10 @@ mod tests {
     #[test]
     fn cleanup_stats_total_mb_freed_correct() {
         use super::cleanup::CleanupStats;
-        let mut stats = CleanupStats::default();
-        stats.bytes_freed = 5_000_000;
+        let stats = CleanupStats {
+            bytes_freed: 5_000_000,
+            ..Default::default()
+        };
         assert_eq!(stats.total_mb_freed(), 5);
     }
 
@@ -139,5 +143,49 @@ mod tests {
         assert!(PathBuf::from(&config.log_file).is_absolute());
         assert!(PathBuf::from(&config.error_log).is_absolute());
         assert!(PathBuf::from(&config.lock_file).is_absolute());
+    }
+
+    // ── checks ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_stats_all_cache_fields_sum_correctly() {
+        let stats = CleanupStats {
+            stout_cache_freed: 1_000_000,
+            bun_cache_freed: 2_000_000,
+            cargo_cache_freed: 3_000_000,
+            system_cache_freed: 4_000_000,
+            bytes_freed: 10_000_000,
+            ..Default::default()
+        };
+        assert_eq!(stats.total_mb_freed(), 10);
+    }
+
+    // ── hermetic regression tests ─────────────────────────────────────────────
+    //
+    // The tests above that asserted on live machine state (`check_disk_space`,
+    // `check_stout`, `update_bun`) were replaced: they depended on the developer's
+    // disk filling up, on stout being installed, and — in `update_bun`'s case —
+    // actually performed a network update as a side effect of `cargo test`.
+
+    #[test]
+    fn cleanup_stats_total_is_sum_of_the_four_contributors() {
+        // Mirrors how comprehensive_cleanup/cleanup_after_upgrades compute bytes_freed.
+        let mut stats = CleanupStats::default();
+        stats.stout_cache_freed = 7;
+        stats.bun_cache_freed = 11;
+        stats.cargo_cache_freed = 13;
+        stats.system_cache_freed = 17;
+        stats.bytes_freed = stats.stout_cache_freed
+            + stats.bun_cache_freed
+            + stats.cargo_cache_freed
+            + stats.system_cache_freed;
+        assert_eq!(stats.bytes_freed, 48);
+    }
+
+    #[test]
+    fn component_stats_default_is_zeroed() {
+        let stats = ComponentStats::default();
+        assert_eq!(stats.upgraded, 0);
+        assert_eq!(stats.skipped, 0);
     }
 }

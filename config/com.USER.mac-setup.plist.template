@@ -60,12 +60,16 @@
         <string>{{HOME}}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>{{HOME}}</string>
-        <key>LOG_DIR</key>
-        <string>{{HOME}}/Library/Logs</string>
-        <key>LOG_RETENTION_DAYS</key>
-        <string>{{LOG_RETENTION_DAYS}}</string>
+        <!-- MIN_DISK_SPACE_GB is the only runtime knob the daemon reads.
+             LOG_DIR / LOG_RETENTION_DAYS used to live here but nothing consumed
+             them: log paths are derived from HOME, and retention is enforced by the
+             cleanup engine's 7-day sweep over ~/Library/Logs. -->
         <key>MIN_DISK_SPACE_GB</key>
         <string>{{MIN_DISK_SPACE_GB}}</string>
+        <key>MAC_SETUP_PRUNE_DAYS</key>
+        <string>{{PRUNE_DAYS}}</string>
+        <key>MAC_SETUP_CACHE_MAX_AGE_DAYS</key>
+        <string>{{CACHE_MAX_AGE_DAYS}}</string>
     </dict>
 
     <key>ThrottleInterval</key>
