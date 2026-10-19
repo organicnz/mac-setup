@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a feature or a change to how mac-setup works
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the workflow you are trying to do —
+        that is more useful than a description of the feature itself, and it often
+        surfaces a simpler solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The workflow, not the implementation.
+      placeholder: |
+        Today I have to run X, then Y, then edit Z by hand ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would mac-setup do instead?
+      placeholder: |
+        mac-setup cleanup --dry-run would list the files it would remove ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: How big is this change?
+      options:
+        - Small — a new flag or a small helper
+        - Medium — a new subcommand or a new section in packages.toml
+        - Large — a change to how the update daemon is structured
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including the "just a shell script" option, if that is what you have in mind.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be happy to implement this.

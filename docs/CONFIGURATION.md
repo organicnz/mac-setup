@@ -1,186 +1,139 @@
 # Configuration Guide
 
-This document explains all configuration options for Homebrew Auto-Update.
+`mac-setup` is configured by environment variables. There is no config file: the values
+below are read at the moment the relevant subcommand runs, so anything you export in your
+shell applies to the next run.
 
-## Installation-Time Configuration
+Every variable listed here is read by exactly one place in the code. If a variable is not
+in this table, nothing consumes it.
 
-Set these environment variables **before** running `cargo run --bin install`:
+---
 
-### Schedule Configuration
+## Runtime configuration
 
-```bash
-# First run time (default: 9:00 AM)
-export BREW_UPDATE_HOUR1=9
-export BREW_UPDATE_MINUTE1=0
+These are read while the daemon runs and can be set in the launchd plist's
+`EnvironmentVariables` block or exported in your shell.
 
-# Second run time (default: 3:00 PM)
-export BREW_UPDATE_HOUR2=15
-export BREW_UPDATE_MINUTE2=0
+| Variable | Read by | Default | Meaning |
+|----------|---------|---------|---------|
+| `HOME` | `src/core/utils.rs` | — | **Required.** Every log path, the lock file location, and the launchd agent path are derived from it. A missing `HOME` is a hard error, never a panic. |
+| `MIN_DISK_SPACE_GB` | `src/core/checks.rs` | `5` | Minimum free space on `/` before the update run starts. A non-integer value logs a warning and falls back to 5. |
+| `TMPDIR` | `src/core/cleanup.rs` | system default | Directory the cleanup engine scans for abandoned temp files. Entries older than 24 hours are removed, but only when they are owned by the current user, are not symlinks, and do not hold a live socket. |
+| `STOUT_PREFIX` | `src/core/stout.rs` | auto-detected | Install prefix for `stout`. When unset, the code probes `/opt/homebrew` then `/usr/local`, so Apple Silicon and Intel both work without configuration. |
 
-# Third run time (default: 9:00 PM)
-export BREW_UPDATE_HOUR3=21
-export BREW_UPDATE_MINUTE3=0
-```
+### Note on `LOG_DIR` and `LOG_RETENTION_DAYS`
 
-### System Settings
+These are **not** read by the code. Log paths are derived from `$HOME/Library/Logs`, and
+retention is enforced by the cleanup engine's own 7-day sweep over that directory. Older
+revisions of this project templated them into the plist; the entries were removed because
+nothing consumed them.
 
-```bash
-# CPU priority (0-20, higher = lower priority, default: 10)
-export BREW_UPDATE_NICE_LEVEL=10
+---
 
-# Minimum seconds between runs (default: 300 = 5 minutes)
-export BREW_UPDATE_THROTTLE_INTERVAL=300
+## Installation-time configuration
 
-# Maximum runtime before force kill (default: 7200 = 2 hours)
-export BREW_UPDATE_EXIT_TIMEOUT=7200
+These are read by `mac-setup install` only. They are baked into the generated launchd
+plist at install time, so export them **before** running the command.
 
-# Log retention in days (default: 1 = 24 hours)
-export BREW_UPDATE_LOG_RETENTION_DAYS=1
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MAC_SETUP_HOUR1` / `MAC_SETUP_MINUTE1` | `9` / `0` | First daily run (09:00 by default) |
+| `MAC_SETUP_HOUR2` / `MAC_SETUP_MINUTE2` | `15` / `0` | Second daily run (15:00 by default) |
+| `MAC_SETUP_HOUR3` / `MAC_SETUP_MINUTE3` | `21` / `0` | Third daily run (21:00 by default) |
+| `MAC_SETUP_NICE_LEVEL` | `10` | CPU priority, 0–20. Higher is lower priority. |
+| `MAC_SETUP_THROTTLE_INTERVAL` | `300` | Minimum seconds between runs, in seconds |
+| `MAC_SETUP_EXIT_TIMEOUT` | `7200` | Hard runtime limit for one run, in seconds |
+| `MAC_SETUP_MIN_DISK_SPACE_GB` | `5` | Minimum free space written into the plist |
 
-# Minimum free disk space in GB (default: 5)
-export BREW_UPDATE_MIN_DISK_SPACE_GB=5
-```
-
-### Example: Custom Installation
-
-```bash
-# Run at 8 AM, 2 PM, and 10 PM
-export BREW_UPDATE_HOUR1=8
-export BREW_UPDATE_HOUR2=14
-export BREW_UPDATE_HOUR3=22
-
-# Keep logs for 3 days
-export BREW_UPDATE_LOG_RETENTION_DAYS=3
-
-# Require 10GB free space
-export BREW_UPDATE_MIN_DISK_SPACE_GB=10
-
-# Install
-cargo run --release --bin install
-```
-
-## Runtime Configuration
-
-These variables are set in the plist and passed to the script at runtime. They can also be overridden by setting them in your shell before running the script manually.
-
-### Script Variables
+### Example: a custom schedule
 
 ```bash
-# Log directory (default: $HOME/Library/Logs)
-export LOG_DIR="$HOME/Library/Logs"
+export MAC_SETUP_HOUR1=8   MAC_SETUP_MINUTE1=0
+export MAC_SETUP_HOUR2=14  MAC_SETUP_MINUTE2=30
+export MAC_SETUP_HOUR3=20  MAC_SETUP_MINUTE3=0
+export MAC_SETUP_NICE_LEVEL=10
+export MAC_SETUP_MIN_DISK_SPACE_GB=5
 
-# Log file path (default: $LOG_DIR/brew-updates.log)
-export LOG_FILE="$LOG_DIR/brew-updates.log"
-
-# Error log path (default: $LOG_DIR/brew-updates-error.log)
-export ERROR_LOG="$LOG_DIR/brew-updates-error.log"
-
-# Lock file path (default: /tmp/brew-update.lock)
-export LOCKFILE="/tmp/brew-update.lock"
-
-# Lock timeout in seconds (default: 7200 = 2 hours)
-export LOCK_TIMEOUT=7200
-
-# Max log file size before rotation (default: 10485760 = 10MB)
-export MAX_LOG_SIZE=10485760
-
-# Log retention days (default: 1)
-export LOG_RETENTION_DAYS=1
-
-# Minimum disk space in GB (default: 5)
-export MIN_DISK_SPACE_GB=5
+mac-setup install
 ```
 
-## Auto-Detected Values
-
-These are automatically detected and don't need configuration:
-
-- **Username**: Detected from `$USER` or `whoami`
-- **Home directory**: Detected from `$HOME`
-- **Homebrew path**: Auto-detected from:
-  - `/opt/homebrew/bin/brew` (Apple Silicon)
-  - `/usr/local/bin/brew` (Intel)
-  - `brew` in PATH (fallback)
-
-## Modifying After Installation
-
-### Change Schedule
-
-1. Edit the plist file:
-```bash
-nano ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-```
-
-2. Modify the `StartCalendarInterval` section
-
-3. Reload:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-launchctl load ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
-```
-
-### Change Runtime Settings
-
-Edit the `EnvironmentVariables` section in the plist:
-
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-    <key>LOG_RETENTION_DAYS</key>
-    <string>3</string>
-    <key>MIN_DISK_SPACE_GB</key>
-    <string>10</string>
-</dict>
-```
-
-Then reload the agent.
-
-## Examples
-
-### Minimal Updates (Once Daily)
+### Example: once a day instead of three times
 
 ```bash
-export BREW_UPDATE_HOUR1=9
-export BREW_UPDATE_HOUR2=9  # Same time = effectively once
-export BREW_UPDATE_HOUR3=9
-cargo run --release --bin install
+export MAC_SETUP_HOUR1=9  MAC_SETUP_MINUTE1=0
+export MAC_SETUP_HOUR2=9  MAC_SETUP_MINUTE2=0
+export MAC_SETUP_HOUR3=9  MAC_SETUP_MINUTE3=0
+mac-setup install
 ```
 
-### Aggressive Updates (Every 4 Hours)
+---
+
+## Cleanup configuration
+
+These are read by `mac-setup cleanup` only.
+
+| Variable | Read by | Default | Meaning |
+|----------|---------|---------|---------|
+| `MAC_SETUP_PRUNE_DAYS` | `src/core/cleanup.rs` | `7` | Age in days passed to `stout --prune`. `0` means "prune everything" and is what `--aggressive` uses. A non-numeric value falls back to 7. |
+
+The age thresholds used for the individual cache directories (14 days for the bun and
+Cargo caches, 30 days for Gradle and the Swift module cache, 60 days for SwiftPM
+checkouts) are currently hard-coded in `src/core/cleanup.rs`.
+
+---
+
+## The package manifest
+
+`packages.toml` is the single place where the provisioned software is declared. It is not
+an environment variable, but it is the other half of the configuration surface.
+
+| Section | Consumed by | Manages |
+|---------|-------------|---------|
+| `[taps]` | `stout` | Third-party taps to add before installing |
+| `[formulae]` | `stout` | Command-line tools and libraries |
+| `[casks]` | `stout` | macOS applications |
+| `[mise]` | `mise` | Language runtimes and versioned tools (node, go, deno, ruby, java, terraform, packer, pulumi) |
+| `[pip]` | `pip` | Python packages installed into the system Python |
+| `[pipx]` | `pipx` | Python applications installed into their own virtualenvs |
+| `[bun]` | `bun` | Global JavaScript packages |
+| `[go]` | `go install` | Go tools installed into `GOBIN` |
+
+The manifest is parsed by `src/commands/provision.rs` and is the subject of the hermetic
+tests in that module.
+
+---
+
+## Where the configuration lands
+
+`mac-setup install` renders `config/com.USER.mac-setup.plist.template` into
+`~/Library/LaunchAgents/com.$USER.mac-setup.plist`, substituting the placeholders in the
+template with the values above.
+
+To change the schedule of an already-installed agent, either re-run `mac-setup install`
+with the new environment, or edit the plist by hand and reload it:
 
 ```bash
-export BREW_UPDATE_HOUR1=6
-export BREW_UPDATE_HOUR2=12
-export BREW_UPDATE_HOUR3=18
-cargo run --release --bin install
+launchctl unload ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
+launchctl load   ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
 ```
 
-### Low Priority (Don't Slow Down System)
+To inspect what is actually installed:
 
 ```bash
-export BREW_UPDATE_NICE_LEVEL=19  # Lowest priority
-export BREW_UPDATE_THROTTLE_INTERVAL=600  # 10 min between runs
-cargo run --release --bin install
+launchctl print gui/$(id -u)/com.$(whoami).mac-setup
+plutil -p ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
 ```
 
-### Keep More Logs
+---
 
-```bash
-export BREW_UPDATE_LOG_RETENTION_DAYS=7  # Keep 1 week
-cargo run --release --bin install
+## Logs
+
+The cleanup engine does not rotate logs, so the 7-day sweep in `mac-setup cleanup` is what
+keeps them bounded.
+
 ```
-
-## Validation
-
-After installation, verify your configuration:
-
-```bash
-# Check schedule
-launchctl print gui/$(id -u)/com.$(whoami).brew-update | grep -A 10 "calendar"
-
-# Check environment variables
-plutil -p ~/Library/LaunchAgents/com.$(whoami).brew-update.plist | grep -A 10 "EnvironmentVariables"
-
-# View full config
-cat ~/Library/LaunchAgents/com.$(whoami).brew-update.plist
+~/Library/Logs/mac-setup.log           # The main log
+~/Library/Logs/mac-setup-error.log     # Errors only
+~/Library/Logs/mac-setup-stdout.log    # launchd StandardOutPath
+~/Library/Logs/mac-setup-stderr.log    # launchd StandardErrorPath
 ```

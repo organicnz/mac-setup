@@ -8,6 +8,10 @@ Unified macOS package management in a single native Rust binary. Provisions a fr
 
 > ⚠️ **macOS Only**: Uses macOS-specific features (launchd, plist files, osascript notifications).
 
+**Looking to contribute?** Start with [CONTRIBUTING.md](CONTRIBUTING.md), then pick up an
+issue labelled [`good first issue`](https://github.com/organicnz/mac-setup/labels/good%20first%20issue)
+or [`help wanted`](https://github.com/organicnz/mac-setup/labels/help%20wanted).
+
 ---
 
 ## Toolchain
@@ -162,6 +166,7 @@ launchctl load ~/Library/LaunchAgents/com.$(whoami).mac-setup.plist
 ```bash
 mac-setup cleanup                # standard
 mac-setup cleanup --aggressive   # removes more cached data
+mac-setup cleanup --dry-run      # report what would be freed, delete nothing
 ```
 
 ---
@@ -179,9 +184,11 @@ mac-setup audit markdown README.md
 ## Install Schedule Variables
 
 ```bash
-export BREW_UPDATE_HOUR1=8    BREW_UPDATE_MINUTE1=0
-export BREW_UPDATE_HOUR2=14   BREW_UPDATE_MINUTE2=30
-export BREW_UPDATE_HOUR3=20   BREW_UPDATE_MINUTE3=0
+export MAC_SETUP_HOUR1=8    MAC_SETUP_MINUTE1=0
+export MAC_SETUP_HOUR2=14   MAC_SETUP_MINUTE2=30
+export MAC_SETUP_HOUR3=20   MAC_SETUP_MINUTE3=0
+export MAC_SETUP_NICE_LEVEL=10
+export MAC_SETUP_MIN_DISK_SPACE_GB=5
 mac-setup install
 ```
 
@@ -207,9 +214,35 @@ lefthook run pre-commit
 
 ---
 
+## Documentation
+
+| Document | What it covers |
+|----------|----------------|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, the safety invariants, the coding and commit conventions |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The update daemon, the `stout` contract layer, the cleanup engine |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every environment variable and what reads it, plus the `packages.toml` manifest |
+| [CLAUDE.md](CLAUDE.md) | Project context for AI assistants |
+
+---
+
+## Contributing
+
+Issues labelled [`good first issue`](https://github.com/organicnz/mac-setup/labels/good%20first%20issue)
+are scoped so that one pull request can close them. Comment on an issue before you start
+so two people do not duplicate the work.
+
+```bash
+gh issue list --label "good first issue"
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup steps, the conventions, and the list
+of safety invariants that a change must not break.
+
+---
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Contributions are accepted under the same terms.
 
 ---
 
@@ -221,7 +254,7 @@ MIT
 - Unified CLI: `provision`, `update`, `fix`, `audit`, `setup`, `cleanup`, `install`
 - `packages.toml` manifest drives all provisioning
 - launchd daemon: stout + mise + bun + pipx auto-updates 3× daily
-- 25 unit tests
+- 61 unit tests
 
 ### v0.2.0
 - Rewrite in Rust, native binary, comprehensive cleanup engine

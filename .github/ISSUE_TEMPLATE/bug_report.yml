@@ -1,0 +1,78 @@
+name: Bug report
+description: Something in mac-setup does not behave the way it should
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in the sections below — the log output is
+        usually what turns a vague report into a fixable one.
+
+  - type: input
+    id: version
+    attributes:
+      label: mac-setup version
+      description: Output of `mac-setup --version`
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers`
+      placeholder: "14.6.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Which subcommand is affected?
+      options:
+        - provision
+        - update
+        - fix
+        - audit
+        - setup
+        - cleanup
+        - install
+        - the launchd agent / scheduler
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: What did you run, and what happened instead?
+      placeholder: |
+        1. mac-setup update
+        2. ...
+        3. It failed with ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The tail of `~/Library/Logs/mac-setup-error.log` or `mac-setup.log` helps most.
+        Run `tail -n 100 ~/Library/Logs/mac-setup.log` and paste the output.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, the contents of `packages.toml`, whether this worked before, etc.
